@@ -47,8 +47,8 @@ import kotlinx.coroutines.flow.StateFlow
  * Minimale Reize, maximale Wirkung.
  * 
  * Features:
- * - Z-Wert Anzeige (Calm/Active/Panic)
- * - Lautstärke-Anzeige (Quiet/Loud/Crying)
+ * - Z-Wert Anzeige (Ruhig/Aktiv/Unruhe)
+ * - Lautstärke-Anzeige (Leise/Laut/Weinen)
  * - Baseline Sound startet sofort bei Auswahl
  * - Ein großer Start/Stop Session Button
  */
@@ -156,7 +156,7 @@ fun TonightScreen(
 
             // === BASELINE SOUND SELECTOR ===
             Text(
-                text = "Baseline Sound",
+                text = "Hintergrundklang",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -201,7 +201,7 @@ fun TonightScreen(
 
 /**
  * Z-Wert / Unruhe Status Display
- * Zeigt: Calm, Active, oder Panic (rot)
+ * Zeigt: Ruhig, Aktiv, oder Unruhe (rot)
  */
 @Composable
 fun UnrestStatusDisplay(
@@ -210,12 +210,12 @@ fun UnrestStatusDisplay(
     isSessionActive: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // Bestimme Status basierend auf Z-Wert
+    // Bestimme Status basierend auf Z-Wert - DEUTSCHE LABELS
     val (statusText, statusColor, shouldPulse) = when {
         !isSessionActive -> Triple("Bereit", SoomiOnBackgroundMuted, false)
-        score.value < 20f -> Triple("Calm", SoomiCalm, false)
-        score.value < 60f -> Triple("Active", SoomiRising, false)
-        else -> Triple("Panic", SoomiCrisis, true)
+        score.value < 20f -> Triple("Ruhig", SoomiCalm, false)
+        score.value < 60f -> Triple("Aktiv", SoomiRising, false)
+        else -> Triple("Unruhe", SoomiCrisis, true)
     }
 
     val animatedColor by animateColorAsState(
@@ -274,7 +274,7 @@ fun UnrestStatusDisplay(
 }
 
 /**
- * Lautstärke-Anzeige im Raum
+ * Lautstärke-Anzeige im Raum - DEUTSCHE LABELS
  */
 @Composable
 fun SoundLevelBarometer(
@@ -317,23 +317,23 @@ fun SoundLevelBarometer(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Scale labels
+        // Scale labels - DEUTSCH
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "Quiet",
+                text = "Leise",
                 style = MaterialTheme.typography.bodySmall,
                 color = SoomiCalm
             )
             Text(
-                text = "Loud", 
+                text = "Laut", 
                 style = MaterialTheme.typography.bodySmall,
                 color = SoomiRising
             )
             Text(
-                text = "Crying",
+                text = "Weinen",
                 style = MaterialTheme.typography.bodySmall,
                 color = SoomiCrisis
             )
@@ -342,7 +342,7 @@ fun SoundLevelBarometer(
 }
 
 /**
- * Baseline Mode Selector - startet Sound sofort bei Auswahl
+ * Baseline Mode Selector - DEUTSCHE LABELS
  */
 @Composable
 fun BaselineModeSelector2(
@@ -368,9 +368,9 @@ fun BaselineModeSelector2(
             ) {
                 Text(
                     text = when (mode) {
-                        BaselineMode.OFF -> "Off"
-                        BaselineMode.GENTLE -> "Gentle"
-                        BaselineMode.MEDIUM -> "Medium"
+                        BaselineMode.OFF -> "Aus"
+                        BaselineMode.GENTLE -> "Sanft"
+                        BaselineMode.MEDIUM -> "Mittel"
                     },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
@@ -388,7 +388,7 @@ fun BaselineModeSelector2(
 }
 
 /**
- * Großer Session Button
+ * Großer Session Button - DEUTSCHE LABELS
  */
 @Composable
 fun SessionButton(
@@ -416,7 +416,7 @@ fun SessionButton(
         )
         Spacer(modifier = Modifier.width(12.dp))
         Text(
-            text = if (isRunning) "Stop Session" else "Start Session",
+            text = if (isRunning) "Sitzung beenden" else "Sitzung starten",
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold
         )
@@ -424,7 +424,7 @@ fun SessionButton(
 }
 
 /**
- * Privacy notice with version number
+ * Privacy notice with version number - DEUTSCH
  */
 @Composable
 fun PrivacyNoticeWithVersion() {
@@ -457,7 +457,7 @@ fun PrivacyNoticeWithVersion() {
 }
 
 /**
- * Permission request card
+ * Permission request card - DEUTSCH
  */
 @Composable
 fun PermissionRequestCard(
@@ -501,7 +501,7 @@ fun PermissionRequestCard(
 }
 
 /**
- * Sound Test Dialog
+ * Sound Test Dialog - DEUTSCH
  */
 @Composable
 fun SoundTestDialog(
@@ -521,7 +521,7 @@ fun SoundTestDialog(
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.width(12.dp))
-                Text("Sound Test")
+                Text("Klangtest")
             }
         },
         text = {
@@ -538,13 +538,13 @@ fun SoundTestDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "Baseline Sounds",
+                    text = "Hintergrundklänge",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold
                 )
 
                 SoundTestItem(
-                    name = "Gentle",
+                    name = "Sanft",
                     description = "Leises Hintergrundrauschen",
                     isPlaying = currentlyPlaying == "gentle",
                     onClick = {
@@ -559,7 +559,7 @@ fun SoundTestDialog(
                 )
 
                 SoundTestItem(
-                    name = "Medium",
+                    name = "Mittel",
                     description = "Mittleres Hintergrundrauschen",
                     isPlaying = currentlyPlaying == "medium",
                     onClick = {
@@ -576,13 +576,13 @@ fun SoundTestDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "Beruhigende Sounds",
+                    text = "Beruhigende Klänge",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold
                 )
 
                 SoundTestItem(
-                    name = "Brown Noise",
+                    name = "Braunes Rauschen",
                     description = "Tief, rumpelnd - am besten für Babys",
                     isPlaying = currentlyPlaying == "brown",
                     onClick = {
@@ -597,7 +597,7 @@ fun SoundTestDialog(
                 )
 
                 SoundTestItem(
-                    name = "Pink Noise",
+                    name = "Rosa Rauschen",
                     description = "Ausgewogen, natürlich",
                     isPlaying = currentlyPlaying == "pink",
                     onClick = {
@@ -612,7 +612,7 @@ fun SoundTestDialog(
                 )
 
                 SoundTestItem(
-                    name = "Shush Pulse",
+                    name = "Shush-Puls",
                     description = "Rhythmisches Shush-Muster",
                     isPlaying = currentlyPlaying == "shush",
                     onClick = {
@@ -753,7 +753,7 @@ private fun TonightTopBar(
         },
         actions = {
             IconButton(onClick = onSoundTestClick) {
-                Icon(Icons.Default.MusicNote, contentDescription = "Sound Test")
+                Icon(Icons.Default.MusicNote, contentDescription = "Klangtest")
             }
             IconButton(onClick = onProgressClick) {
                 Icon(Icons.Default.CalendarMonth, contentDescription = "Fortschritt")
