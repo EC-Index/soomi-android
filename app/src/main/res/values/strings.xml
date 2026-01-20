@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">SOOMI</string>
+    <string name="notification_service_title">SOOMI Running</string>
+    <string name="notification_service_text">Monitoring locally</string>
+    <string name="permission_microphone_title">Microphone Permission</string>
+    <string name="permission_microphone_rationale">SOOMI needs microphone access to hear when your baby stirs. Audio is processed locally and never recorded or uploaded.</string>
+    <string name="privacy_notice">Runs locally. No recordings.</string>
+    <string name="telemetry_description">Help SOOMI improve: Share anonymous usage stats (no audio/video recordings, can be turned off anytime).</string>
+    <string name="disclaimer">Not a medical device. For informational purposes only.</string>
+</resources>
