@@ -3,6 +3,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("com.google.devtools.ksp")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -11,7 +12,7 @@ android {
 
     defaultConfig {
         applicationId = "com.soomi.baby"
-        minSdk = 26  // Android 8.0 - good balance of features and device coverage
+        minSdk = 26
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0-beta"
@@ -22,7 +23,6 @@ android {
             useSupportLibrary = true
         }
 
-        // Room schema export for migrations
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
         }
@@ -39,7 +39,7 @@ android {
         }
         debug {
             isDebuggable = true
-            applicationIdSuffix = ".debug"
+            // applicationIdSuffix = ".debug"
         }
     }
 
@@ -73,7 +73,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.1")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 
-    // Compose BOM - single version management
+    // Compose BOM
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
@@ -84,22 +84,26 @@ dependencies {
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.7.5")
 
-    // Room for local database
+    // Room
     implementation("androidx.room:room-runtime:2.8.4")
     implementation("androidx.room:room-ktx:2.8.4")
     ksp("androidx.room:room-compiler:2.8.4")
 
-    // DataStore for preferences
+    // DataStore
     implementation("androidx.datastore:datastore-preferences:1.0.0")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
-    // Work Manager for background tasks (telemetry upload)
+    // Work Manager
     implementation("androidx.work:work-runtime-ktx:2.9.0")
 
-    // Gson for JSON serialization (telemetry export)
+    // Gson
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // Firebase
+    implementation(platform("com.google.firebase:firebase-bom:34.8.0"))
+    implementation("com.google.firebase:firebase-analytics")
 
     // Testing
     testImplementation("junit:junit:4.13.2")

@@ -36,6 +36,10 @@ import kotlinx.coroutines.flow.*
  * - Uses efficient audio processing
  * - Holds partial wake lock only when needed
  * - Releases resources when stopped
+ * 
+ * AUDIO FEEDBACK PREVENTION:
+ * - Informs AudioFeatureExtractor when playback is active
+ * - Uses playback level to adjust noise baseline
  */
 class SoomiService : Service() {
 
@@ -119,6 +123,10 @@ class SoomiService : Service() {
     private var peakScore = 0f
     private var manualInterventionCount = 0
     private var panicStopCount = 0
+    
+    // Track current playback state for feedback prevention
+    private var isPlaybackActive = false
+    private var currentPlaybackLevel = 0f
 
     override fun onCreate() {
         super.onCreate()
@@ -150,6 +158,8 @@ class SoomiService : Service() {
             serviceScope?.launch {
                 interventionEngine?.currentLevel?.collect { level ->
                     _currentLevel.value = level
+                    // Inform feature extractor about playback level
+                    updatePlaybackState(level)
                 }
             }
         } catch (e: Exception) {
@@ -181,6 +191,23 @@ class SoomiService : Service() {
             Log.e(TAG, "Error in onDestroy", e)
         }
         super.onDestroy()
+    }
+    
+    /**
+     * Update playback state and inform feature extractor
+     * This helps prevent audio feedback from affecting baby detection
+     */
+    private fun updatePlaybackState(level: InterventionLevel) {
+        val wasPlaying = isPlaybackActive
+        isPlaybackActive = level != InterventionLevel.OFF
+        currentPlaybackLevel = level.volumeMultiplier
+        
+        // Inform feature extractor
+        featureExtractor?.setPlaybackActive(isPlaybackActive, currentPlaybackLevel)
+        
+        if (wasPlaying != isPlaybackActive) {
+            Log.d(TAG, "Playback state changed: active=$isPlaybackActive, level=$currentPlaybackLevel")
+        }
     }
 
     /**
@@ -221,6 +248,9 @@ class SoomiService : Service() {
                     // Start audio processing
                     audioInput?.startCapture()
                     interventionEngine?.start()
+                    
+                    // Initial playback state
+                    updatePlaybackState(_currentLevel.value)
 
                     _isRunning.value = true
 
@@ -261,6 +291,10 @@ class SoomiService : Service() {
             
             audioInput?.stopCapture()
             interventionEngine?.stop()
+            
+            // Clear playback state
+            isPlaybackActive = false
+            currentPlaybackLevel = 0f
 
             // Finalize session in database (in a separate scope that won't be cancelled)
             val sessionId = currentSessionId
@@ -324,6 +358,9 @@ class SoomiService : Service() {
         panicStopCount++
         try {
             interventionEngine?.panicStop()
+            isPlaybackActive = false
+            currentPlaybackLevel = 0f
+            featureExtractor?.setPlaybackActive(false, 0f)
             updateNotification("Paused - tap to resume")
         } catch (e: Exception) {
             Log.e(TAG, "Error in panicStop", e)

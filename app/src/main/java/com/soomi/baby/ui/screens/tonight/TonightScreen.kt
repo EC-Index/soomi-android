@@ -213,9 +213,9 @@ fun UnrestStatusDisplay(
     // Bestimme Status basierend auf Z-Wert - DEUTSCHE LABELS
     val (statusText, statusColor, shouldPulse) = when {
         !isSessionActive -> Triple("Bereit", SoomiOnBackgroundMuted, false)
-        score.value < 20f -> Triple("Ruhig", SoomiCalm, false)
-        score.value < 60f -> Triple("Aktiv", SoomiRising, false)
-        else -> Triple("Unruhe", SoomiCrisis, true)
+        score.value < 20f -> Triple("Baby ist ruhig", SoomiCalm, false)
+        score.value < 60f -> Triple("Baby ist unruhig", SoomiRising, true)
+        else -> Triple("Extrem unruhig!", SoomiCrisis, true)
     }
 
     val animatedColor by animateColorAsState(
@@ -449,7 +449,7 @@ fun PrivacyNoticeWithVersion() {
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "SOOMI v2.1",
+            text = "SOOMI v2.4",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
         )
@@ -1025,3 +1025,4 @@ class TonightViewModel(
         _uiState.value = _uiState.value.copy(showPermissionDialog = false)
     }
 }
+
