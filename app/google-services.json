@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "497496526872",
+    "project_id": "soomi-app-b7c32",
+    "storage_bucket": "soomi-app-b7c32.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:497496526872:android:1737db0221e78b6810336d",
+        "android_client_info": {
+          "package_name": "com.soomi.baby"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCTdkf9eJSUQM2tWPYe4BX3SX9lNvB_IYs"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
