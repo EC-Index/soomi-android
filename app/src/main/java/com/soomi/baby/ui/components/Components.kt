@@ -46,13 +46,13 @@ fun UnrestScoreDisplay(
         animationSpec = tween(500),
         label = "scoreColor"
     )
-    
+
     val trendIcon = when (score.trend) {
         UnrestScore.Trend.RISING -> Icons.Default.TrendingUp
         UnrestScore.Trend.FALLING -> Icons.Default.TrendingDown
         UnrestScore.Trend.STABLE -> Icons.Default.TrendingFlat
     }
-    
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier
@@ -64,7 +64,7 @@ fun UnrestScoreDisplay(
             color = scoreColor,
             fontWeight = FontWeight.Light
         )
-        
+
         // Trend indicator
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -99,13 +99,13 @@ fun StatusDisplay(
     modifier: Modifier = Modifier
 ) {
     val (label, color, icon, shouldPulse) = when (state) {
-        SoomiState.STOPPED -> StatusInfo("Stopped", SoomiOnBackgroundMuted, Icons.Default.Stop, false)
+        SoomiState.STOPPED, SoomiState.IDLE -> StatusInfo("Stopped", SoomiOnBackgroundMuted, Icons.Default.Stop, false)
         SoomiState.LISTENING -> StatusInfo("Listening", SoomiCalm, Icons.Default.Hearing, false)
         SoomiState.SOOTHING -> StatusInfo("Soothing", SoomiSoothing, Icons.Default.Waves, true)
         SoomiState.COOLDOWN -> StatusInfo("Cooldown", SoomiRising, Icons.Default.HourglassEmpty, false)
         SoomiState.BASELINE -> StatusInfo("Baseline", SoomiCalm, Icons.Default.GraphicEq, false)
     }
-    
+
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -116,7 +116,7 @@ fun StatusDisplay(
         ),
         label = "pulseAlpha"
     )
-    
+
     Surface(
         color = color.copy(alpha = 0.15f * alpha),
         shape = RoundedCornerShape(24.dp),
@@ -209,7 +209,7 @@ fun PrimaryActionButton(
         animationSpec = tween(300),
         label = "buttonColor"
     )
-    
+
     Button(
         onClick = onClick,
         colors = ButtonDefaults.buttonColors(containerColor = backgroundColor),
@@ -325,7 +325,7 @@ fun NightSummaryCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            
+
             // Feedback indicator
             helpedRating?.let {
                 val (icon, color) = when (it) {
@@ -377,6 +377,36 @@ fun SettingsSlider(
             onValueChange = onValueChange,
             valueRange = valueRange,
             modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
+@Composable
+fun SettingsToggle(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange
         )
     }
 }

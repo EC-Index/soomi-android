@@ -14,8 +14,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.soomi.baby.data.repository.LearningRepository
 import com.soomi.baby.data.repository.SettingsRepository
 import com.soomi.baby.domain.model.ThresholdConfig
-import com.soomi.baby.ui.components.SettingsSlider
-import com.soomi.baby.ui.components.SettingsToggle
+import com.soomi.baby.ui.components.*
 import com.soomi.baby.ui.theme.SoomiCalm
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

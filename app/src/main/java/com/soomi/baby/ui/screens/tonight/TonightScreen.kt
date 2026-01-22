@@ -219,8 +219,8 @@ fun UnrestStatusDisplay(
 ) {
     // Determine status based on state
     val (statusText, statusColor, shouldPulse) = when (state) {
-        SoomiState.STOPPED -> Triple("Bereit", SoomiOnBackgroundMuted, false)
-        SoomiState.LISTENING -> {
+        SoomiState.STOPPED, SoomiState.IDLE -> Triple("Bereit", SoomiOnBackgroundMuted, false)
+        SoomiState.LISTENING, SoomiState.BASELINE -> {
             when {
                 score.value < 35f -> Triple("Baby ist ruhig", SoomiCalm, false)
                 score.value < 70f -> Triple("Baby bewegt sich", SoomiRising, false)

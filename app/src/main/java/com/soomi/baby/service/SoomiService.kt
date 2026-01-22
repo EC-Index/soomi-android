@@ -439,14 +439,14 @@ class SoomiService : Service() {
                 SoomiState.COOLDOWN -> {
                     updateNotification("Abklingzeit läuft")
                 }
-                SoomiState.LISTENING -> {
+                SoomiState.LISTENING, SoomiState.BASELINE -> {
                     if (soothingStartTime > 0) {
                         totalSoothingMs += System.currentTimeMillis() - soothingStartTime
                         soothingStartTime = 0L
                     }
                     updateNotification("Überwacht lokal")
                 }
-                SoomiState.STOPPED -> {
+                SoomiState.STOPPED, SoomiState.IDLE -> {
                     if (soothingStartTime > 0) {
                         totalSoothingMs += System.currentTimeMillis() - soothingStartTime
                         soothingStartTime = 0L
