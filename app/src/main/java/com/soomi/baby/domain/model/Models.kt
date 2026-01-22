@@ -7,7 +7,7 @@ import java.time.LocalDate
  * Core domain models for SOOMI
  * These represent the business logic concepts, independent of storage or UI.
  * 
- * v2.6: Simplified state machine with LISTENING, SOOTHING, COOLDOWN, STOPPED
+ * v2.7: Simplified state machine with LISTENING, SOOTHING, COOLDOWN, STOPPED
  */
 
 /**
@@ -49,18 +49,30 @@ enum class BaselineMode {
 }
 
 /**
- * SOOMI State Machine States (v2.6 - Simplified)
+ * SOOMI State Machine States (v2.7 - Simplified)
  * 
  * STOPPED   - Session not running
  * LISTENING - Session active, monitoring, only baseline playing (if enabled)
  * SOOTHING  - Intervention sound playing (baby is/was unruhig)
  * COOLDOWN  - Baby is calm, but sound continues with countdown timer
+ * 
+ * Legacy states kept for compatibility:
+ * IDLE      - Alias for STOPPED
+ * BASELINE  - Alias for LISTENING
  */
 enum class SoomiState {
     STOPPED,    // Session not running
     LISTENING,  // Monitoring, baseline only
     SOOTHING,   // Intervention active
-    COOLDOWN    // Post-calm countdown, sound still playing
+    COOLDOWN,   // Post-calm countdown, sound still playing
+    
+    // Legacy aliases for backward compatibility
+    IDLE,       // Same as STOPPED
+    BASELINE;   // Same as LISTENING
+    
+    /** Check if session is currently active */
+    val isSessionActive: Boolean
+        get() = this != STOPPED && this != IDLE
 }
 
 /**
@@ -98,6 +110,24 @@ enum class SoundType {
     PINK_NOISE,     // Balanced noise
     SHUSH_PULSE     // Rhythmic shushing pattern modulated on noise
 }
+
+/**
+ * FSM Thresholds for v2.7 SimpleFsm
+ */
+data class FsmThresholds(
+    /** Unruhe-Schwelle für SOOTHING */
+    val soothingTriggerThreshold: Float = 70f,
+    /** Wie lange Schwelle gehalten werden muss (ms) */
+    val soothingTriggerDurationMs: Long = 1500L,
+    /** Unruhe-Schwelle für COOLDOWN */
+    val cooldownTriggerThreshold: Float = 35f,
+    /** Wie lange ruhig sein muss (ms) */
+    val cooldownTriggerDurationMs: Long = 3000L,
+    /** Unruhe für Retrigger in COOLDOWN */
+    val retriggerThreshold: Float = 55f,
+    /** Cooldown Timer Dauer (ms) */
+    val cooldownDurationMs: Long = 45000L
+)
 
 /**
  * Configuration thresholds for the intervention engine (v2.6)

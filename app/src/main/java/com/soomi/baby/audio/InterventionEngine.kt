@@ -152,10 +152,10 @@ class InterventionEngine(
         lastScoreTime = currentTime
         
         when (_state.value) {
-            SoomiState.STOPPED -> {
+            SoomiState.STOPPED, SoomiState.IDLE -> {
                 // Do nothing
             }
-            SoomiState.LISTENING -> {
+            SoomiState.LISTENING, SoomiState.BASELINE -> {
                 handleListeningState(score, currentTime)
             }
             SoomiState.SOOTHING -> {

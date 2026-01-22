@@ -74,7 +74,7 @@ class SimpleFsm(
      * Start session - transitions from STOPPED to LISTENING
      */
     fun startSession(baseline: BaselineMode, soundType: SoundType = SoundType.BROWN_NOISE) {
-        if (_state.value != SoomiState.STOPPED) {
+        if (_state.value != SoomiState.STOPPED && _state.value != SoomiState.IDLE) {
             Log.w(TAG, "Cannot start: already in state ${_state.value}")
             return
         }
@@ -116,7 +116,7 @@ class SimpleFsm(
      * Call this every ~500ms with the current score
      */
     fun processScore(score: UnrestScore) {
-        if (_state.value == SoomiState.STOPPED) return
+        if (_state.value == SoomiState.STOPPED || _state.value == SoomiState.IDLE) return
         
         val now = System.currentTimeMillis()
         
@@ -126,10 +126,10 @@ class SimpleFsm(
         }
         
         when (_state.value) {
-            SoomiState.LISTENING -> handleListeningState(score, now)
+            SoomiState.LISTENING, SoomiState.BASELINE -> handleListeningState(score, now)
             SoomiState.SOOTHING -> handleSoothingState(score, now)
             SoomiState.COOLDOWN -> handleCooldownState(score, now)
-            SoomiState.STOPPED -> { /* Do nothing */ }
+            SoomiState.STOPPED, SoomiState.IDLE -> { /* Do nothing */ }
         }
     }
     
@@ -157,7 +157,7 @@ class SimpleFsm(
      */
     fun setBaselineMode(mode: BaselineMode) {
         baselineMode = mode
-        if (_state.value == SoomiState.LISTENING) {
+        if (_state.value == SoomiState.LISTENING || _state.value == SoomiState.BASELINE) {
             applyBaselineLevel()
         }
     }
@@ -176,7 +176,7 @@ class SimpleFsm(
      * Manual soothe trigger - immediately enter SOOTHING
      */
     fun manualSoothe() {
-        if (_state.value == SoomiState.STOPPED) return
+        if (_state.value == SoomiState.STOPPED || _state.value == SoomiState.IDLE) return
         
         Log.i(TAG, "Manual soothe triggered")
         enterSoothing()
