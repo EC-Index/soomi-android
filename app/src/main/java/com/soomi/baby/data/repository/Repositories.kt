@@ -319,6 +319,8 @@ class SessionRepository(
  * Settings Repository
  * 
  * Wraps DataStore preferences with domain models
+ * 
+ * v2.6: Added soundProfile support
  */
 class SettingsRepository(
     private val preferences: SoomiPreferences
@@ -332,6 +334,9 @@ class SettingsRepository(
     val audioOutputMode: Flow<String> = preferences.audioOutputMode
     val singlePhoneMode: Flow<Boolean> = preferences.singlePhoneMode
     
+    // v2.6: Sound Profile
+    val soundProfile: Flow<SoundProfile> = preferences.soundProfile
+    
     suspend fun setBaselineMode(mode: BaselineMode) = preferences.setBaselineMode(mode)
     suspend fun setZEarlyThreshold(value: Float) = preferences.setZEarlyThreshold(value)
     suspend fun setZCrisisThreshold(value: Float) = preferences.setZCrisisThreshold(value)
@@ -343,6 +348,9 @@ class SettingsRepository(
     suspend fun setAppLanguage(language: String) = preferences.setAppLanguage(language)
     suspend fun setAudioOutputMode(mode: String) = preferences.setAudioOutputMode(mode)
     suspend fun setSinglePhoneMode(enabled: Boolean) = preferences.setSinglePhoneMode(enabled)
+    
+    // v2.6: Sound Profile
+    suspend fun setSoundProfile(profile: SoundProfile) = preferences.setSoundProfile(profile)
 }
 
 /**

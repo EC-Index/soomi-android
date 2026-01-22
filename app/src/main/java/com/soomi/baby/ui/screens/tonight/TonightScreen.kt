@@ -27,6 +27,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -35,33 +37,31 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.soomi.baby.audio.AudioOutputEngine
 import com.soomi.baby.domain.model.*
 import com.soomi.baby.service.SoomiService
-import com.soomi.baby.ui.components.*
 import com.soomi.baby.ui.theme.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * SOOMI 2.0 - Tonight Screen
+ * SOOMI 2.6 - Tonight Screen
  * 
- * Minimale Reize, maximale Wirkung.
- * 
- * Features:
- * - Z-Wert Anzeige (Ruhig/Aktiv/Unruhe)
- * - Lautstärke-Anzeige (Leise/Laut/Weinen)
- * - Baseline Sound startet sofort bei Auswahl
- * - Ein großer Start/Stop Session Button
+ * v2.6 Changes:
+ * - New state machine: STOPPED, LISTENING, SOOTHING, COOLDOWN
+ * - "Unruhe 0" instead of "Z: 0"
+ * - "Beruhigung starten/beenden" instead of "Sitzung starten/beenden"
+ * - Cooldown countdown: "Abklingzeit: MM:SS"
+ * - Sound continues during cooldown
  */
 @Composable
 fun TonightScreen(
     viewModel: TonightViewModel,
     onNavigateToProgress: () -> Unit,
-    onNavigateToSettings: () -> Unit
+    onNavigateToSettings: () -> Unit,
+    onNavigateToSoundLibrary: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    // Sound test dialog state
     var showSoundDialog by remember { mutableStateOf(false) }
 
     // Permission handling
@@ -75,7 +75,6 @@ fun TonightScreen(
         }
     }
 
-    // Check permission on load
     LaunchedEffect(Unit) {
         hasPermission = context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
@@ -84,7 +83,6 @@ fun TonightScreen(
         }
     }
 
-    // Cleanup on dispose
     DisposableEffect(Unit) {
         viewModel.bindService(context)
         onDispose {
@@ -93,7 +91,6 @@ fun TonightScreen(
         }
     }
 
-    // Sound test dialog
     if (showSoundDialog) {
         SoundTestDialog(
             onDismiss = { 
@@ -113,6 +110,7 @@ fun TonightScreen(
         topBar = {
             TonightTopBar(
                 onSoundTestClick = { showSoundDialog = true },
+                onSoundLibraryClick = onNavigateToSoundLibrary,
                 onProgressClick = onNavigateToProgress,
                 onSettingsClick = onNavigateToSettings
             )
@@ -127,24 +125,24 @@ fun TonightScreen(
         ) {
             Spacer(modifier = Modifier.height(24.dp))
 
-            // === STATUS 1: Z-WERT / UNRUHE-LEVEL ===
+            // === MAIN STATUS DISPLAY ===
             UnrestStatusDisplay(
                 state = uiState.state,
                 score = uiState.currentScore,
+                cooldownRemaining = uiState.cooldownRemaining,
                 isSessionActive = uiState.isRunning,
                 modifier = Modifier.fillMaxWidth()
             )
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // === STATUS 2: LAUTSTÄRKE IM RAUM ===
+            // === SOUND LEVEL BAROMETER ===
             if (hasPermission) {
                 SoundLevelBarometer(
                     level = uiState.soundLevel,
                     modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                // Request permission card
                 PermissionRequestCard(
                     onRequestPermission = {
                         permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -161,11 +159,21 @@ fun TonightScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(12.dp))
-            BaselineModeSelector2(
+            BaselineModeSelector(
                 selectedMode = uiState.baselineMode,
                 onModeSelected = { mode ->
                     viewModel.setBaselineModeWithSound(mode)
                 },
+                enabled = !uiState.isRunning, // Disable during session
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // === SELECTED SOUND PROFILE ===
+            SelectedProfileDisplay(
+                profile = uiState.selectedProfile,
+                onClick = onNavigateToSoundLibrary,
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -191,7 +199,6 @@ fun TonightScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Privacy notice + Version
             PrivacyNoticeWithVersion()
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -200,22 +207,28 @@ fun TonightScreen(
 }
 
 /**
- * Z-Wert / Unruhe Status Display
- * Zeigt: Ruhig, Aktiv, oder Unruhe (rot)
+ * Main status display showing state and unrest level
  */
 @Composable
 fun UnrestStatusDisplay(
     state: SoomiState,
     score: UnrestScore,
+    cooldownRemaining: Int,
     isSessionActive: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // Bestimme Status basierend auf Z-Wert - DEUTSCHE LABELS
-    val (statusText, statusColor, shouldPulse) = when {
-        !isSessionActive -> Triple("Bereit", SoomiOnBackgroundMuted, false)
-        score.value < 20f -> Triple("Baby ist ruhig", SoomiCalm, false)
-        score.value < 60f -> Triple("Baby ist unruhig", SoomiRising, true)
-        else -> Triple("Extrem unruhig!", SoomiCrisis, true)
+    // Determine status based on state
+    val (statusText, statusColor, shouldPulse) = when (state) {
+        SoomiState.STOPPED -> Triple("Bereit", SoomiOnBackgroundMuted, false)
+        SoomiState.LISTENING -> {
+            when {
+                score.value < 35f -> Triple("Baby ist ruhig", SoomiCalm, false)
+                score.value < 70f -> Triple("Baby bewegt sich", SoomiRising, false)
+                else -> Triple("Baby ist unruhig", SoomiCrisis, true)
+            }
+        }
+        SoomiState.SOOTHING -> Triple("Beruhigung aktiv", SoomiSoothing, true)
+        SoomiState.COOLDOWN -> Triple("Abklingzeit", SoomiCalm, false)
     }
 
     val animatedColor by animateColorAsState(
@@ -224,7 +237,6 @@ fun UnrestStatusDisplay(
         label = "statusColor"
     )
 
-    // Pulsing animation for Panic state
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 1f,
@@ -240,31 +252,49 @@ fun UnrestStatusDisplay(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Großes Status-Oval
         Surface(
             color = animatedColor.copy(alpha = 0.15f * alpha),
             shape = RoundedCornerShape(32.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .height(100.dp)
+                .height(if (state == SoomiState.COOLDOWN) 120.dp else 100.dp)
         ) {
-            Box(
-                contentAlignment = Alignment.Center
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+            Box(contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         text = statusText,
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold,
                         color = animatedColor.copy(alpha = alpha)
                     )
-                    if (isSessionActive) {
+                    
+                    if (isSessionActive && state != SoomiState.COOLDOWN) {
+                        val unrestDescription = "Unruhe-Wert ${score.value.toInt()}"
                         Text(
-                            text = "Z: ${score.value.toInt()}",
+                            text = "Unruhe ${score.value.toInt()}",
                             style = MaterialTheme.typography.bodyMedium,
-                            color = animatedColor.copy(alpha = 0.7f)
+                            color = animatedColor.copy(alpha = 0.7f),
+                            modifier = Modifier.semantics { 
+                                contentDescription = unrestDescription 
+                            }
+                        )
+                    }
+                    
+                    // Cooldown countdown
+                    if (state == SoomiState.COOLDOWN && cooldownRemaining > 0) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val minutes = cooldownRemaining / 60
+                        val seconds = cooldownRemaining % 60
+                        Text(
+                            text = String.format("%02d:%02d", minutes, seconds),
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = animatedColor
+                        )
+                        Text(
+                            text = "Sound läuft weiter",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = animatedColor.copy(alpha = 0.6f)
                         )
                     }
                 }
@@ -274,7 +304,7 @@ fun UnrestStatusDisplay(
 }
 
 /**
- * Lautstärke-Anzeige im Raum - DEUTSCHE LABELS
+ * Sound level barometer
  */
 @Composable
 fun SoundLevelBarometer(
@@ -298,7 +328,14 @@ fun SoundLevelBarometer(
         modifier = modifier,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Barometer bar
+        Text(
+            text = "Geräuschpegel",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        
+        Spacer(modifier = Modifier.height(8.dp))
+        
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -317,37 +354,25 @@ fun SoundLevelBarometer(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Scale labels - DEUTSCH
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(
-                text = "Leise",
-                style = MaterialTheme.typography.bodySmall,
-                color = SoomiCalm
-            )
-            Text(
-                text = "Laut", 
-                style = MaterialTheme.typography.bodySmall,
-                color = SoomiRising
-            )
-            Text(
-                text = "Weinen",
-                style = MaterialTheme.typography.bodySmall,
-                color = SoomiCrisis
-            )
+            Text("Leise", style = MaterialTheme.typography.bodySmall, color = SoomiCalm)
+            Text("Laut", style = MaterialTheme.typography.bodySmall, color = SoomiRising)
+            Text("Weinen", style = MaterialTheme.typography.bodySmall, color = SoomiCrisis)
         }
     }
 }
 
 /**
- * Baseline Mode Selector - DEUTSCHE LABELS
+ * Baseline mode selector
  */
 @Composable
-fun BaselineModeSelector2(
+fun BaselineModeSelector(
     selectedMode: BaselineMode,
     onModeSelected: (BaselineMode) -> Unit,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -364,7 +389,7 @@ fun BaselineModeSelector2(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .weight(1f)
-                    .clickable { onModeSelected(mode) }
+                    .clickable(enabled = enabled) { onModeSelected(mode) }
             ) {
                 Text(
                     text = when (mode) {
@@ -377,7 +402,9 @@ fun BaselineModeSelector2(
                     color = if (isSelected) {
                         MaterialTheme.colorScheme.onPrimary
                     } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                            alpha = if (enabled) 1f else 0.5f
+                        )
                     },
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(vertical = 16.dp, horizontal = 8.dp)
@@ -388,7 +415,50 @@ fun BaselineModeSelector2(
 }
 
 /**
- * Großer Session Button - DEUTSCHE LABELS
+ * Selected sound profile display
+ */
+@Composable
+fun SelectedProfileDisplay(
+    profile: SoundProfile,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(
+                    text = "Klangprofil",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = profile.displayName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = "Klangbibliothek öffnen",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/**
+ * Main session button
  */
 @Composable
 fun SessionButton(
@@ -402,12 +472,16 @@ fun SessionButton(
         animationSpec = tween(300),
         label = "buttonColor"
     )
+    
+    val buttonText = if (isRunning) "Beruhigung beenden" else "Beruhigung starten"
 
     Button(
         onClick = onClick,
         colors = ButtonDefaults.buttonColors(containerColor = backgroundColor),
         shape = RoundedCornerShape(20.dp),
-        modifier = modifier.height(64.dp)
+        modifier = modifier
+            .height(64.dp)
+            .semantics { contentDescription = buttonText }
     ) {
         Icon(
             imageVector = if (isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
@@ -416,7 +490,7 @@ fun SessionButton(
         )
         Spacer(modifier = Modifier.width(12.dp))
         Text(
-            text = if (isRunning) "Sitzung beenden" else "Sitzung starten",
+            text = buttonText,
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.Bold
         )
@@ -424,16 +498,12 @@ fun SessionButton(
 }
 
 /**
- * Privacy notice with version number - DEUTSCH
+ * Privacy notice with version
  */
 @Composable
 fun PrivacyNoticeWithVersion() {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 imageVector = Icons.Default.Lock,
                 contentDescription = null,
@@ -449,7 +519,7 @@ fun PrivacyNoticeWithVersion() {
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "SOOMI v2.4",
+            text = "soomi Baby v2.6",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
         )
@@ -457,16 +527,12 @@ fun PrivacyNoticeWithVersion() {
 }
 
 /**
- * Permission request card - DEUTSCH
+ * Permission request card
  */
 @Composable
-fun PermissionRequestCard(
-    onRequestPermission: () -> Unit
-) {
+fun PermissionRequestCard(onRequestPermission: () -> Unit) {
     Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
@@ -487,7 +553,7 @@ fun PermissionRequestCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = "SOOMI braucht Mikrofon-Zugriff um Baby-Geräusche zu erkennen.\nAudio wird lokal verarbeitet und nie aufgezeichnet.",
+                text = "soomi Baby braucht Mikrofon-Zugriff um Baby-Geräusche zu erkennen.\nAudio wird lokal verarbeitet und nie aufgezeichnet.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -500,8 +566,54 @@ fun PermissionRequestCard(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TonightTopBar(
+    onSoundTestClick: () -> Unit,
+    onSoundLibraryClick: () -> Unit,
+    onProgressClick: () -> Unit,
+    onSettingsClick: () -> Unit
+) {
+    TopAppBar(
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Moon icon
+                Icon(
+                    imageVector = Icons.Default.NightsStay,
+                    contentDescription = null,
+                    tint = SoomiPrimary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "soomi Baby",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        actions = {
+            IconButton(onClick = onSoundLibraryClick) {
+                Icon(Icons.Default.LibraryMusic, contentDescription = "Klangbibliothek")
+            }
+            IconButton(onClick = onSoundTestClick) {
+                Icon(Icons.Default.MusicNote, contentDescription = "Klangtest")
+            }
+            IconButton(onClick = onProgressClick) {
+                Icon(Icons.Default.CalendarMonth, contentDescription = "Fortschritt")
+            }
+            IconButton(onClick = onSettingsClick) {
+                Icon(Icons.Default.Settings, contentDescription = "Einstellungen")
+            }
+        },
+        colors = TopAppBarDefaults.topAppBarColors(
+            containerColor = MaterialTheme.colorScheme.background
+        )
+    )
+}
+
 /**
- * Sound Test Dialog - DEUTSCH
+ * Sound test dialog
  */
 @Composable
 fun SoundTestDialog(
@@ -530,56 +642,12 @@ fun SoundTestDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    text = "Tippe zum Abspielen. Nochmal tippen zum Stoppen.",
+                    text = "Tippe zum Abspielen/Stoppen.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 
                 Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "Hintergrundklänge",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold
-                )
-
-                SoundTestItem(
-                    name = "Sanft",
-                    description = "Leises Hintergrundrauschen",
-                    isPlaying = currentlyPlaying == "gentle",
-                    onClick = {
-                        if (currentlyPlaying == "gentle") {
-                            onStopSound()
-                            currentlyPlaying = null
-                        } else {
-                            onPlaySound(SoundType.BROWN_NOISE, 0.3f)
-                            currentlyPlaying = "gentle"
-                        }
-                    }
-                )
-
-                SoundTestItem(
-                    name = "Mittel",
-                    description = "Mittleres Hintergrundrauschen",
-                    isPlaying = currentlyPlaying == "medium",
-                    onClick = {
-                        if (currentlyPlaying == "medium") {
-                            onStopSound()
-                            currentlyPlaying = null
-                        } else {
-                            onPlaySound(SoundType.BROWN_NOISE, 0.5f)
-                            currentlyPlaying = "medium"
-                        }
-                    }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = "Beruhigende Klänge",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold
-                )
 
                 SoundTestItem(
                     name = "Braunes Rauschen",
@@ -590,7 +658,7 @@ fun SoundTestDialog(
                             onStopSound()
                             currentlyPlaying = null
                         } else {
-                            onPlaySound(SoundType.BROWN_NOISE, 0.6f)
+                            onPlaySound(SoundType.BROWN_NOISE, 0.5f)
                             currentlyPlaying = "brown"
                         }
                     }
@@ -605,7 +673,7 @@ fun SoundTestDialog(
                             onStopSound()
                             currentlyPlaying = null
                         } else {
-                            onPlaySound(SoundType.PINK_NOISE, 0.6f)
+                            onPlaySound(SoundType.PINK_NOISE, 0.5f)
                             currentlyPlaying = "pink"
                         }
                     }
@@ -620,7 +688,7 @@ fun SoundTestDialog(
                             onStopSound()
                             currentlyPlaying = null
                         } else {
-                            onPlaySound(SoundType.SHUSH_PULSE, 0.6f)
+                            onPlaySound(SoundType.SHUSH_PULSE, 0.5f)
                             currentlyPlaying = "shush"
                         }
                     }
@@ -635,9 +703,6 @@ fun SoundTestDialog(
     )
 }
 
-/**
- * Sound Test Item
- */
 @Composable
 fun SoundTestItem(
     name: String,
@@ -703,9 +768,6 @@ fun SoundTestItem(
     }
 }
 
-/**
- * Playing indicator animation
- */
 @Composable
 fun PlayingIndicator() {
     val infiniteTransition = rememberInfiniteTransition(label = "playing")
@@ -736,51 +798,19 @@ fun PlayingIndicator() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TonightTopBar(
-    onSoundTestClick: () -> Unit,
-    onProgressClick: () -> Unit,
-    onSettingsClick: () -> Unit
-) {
-    TopAppBar(
-        title = {
-            Text(
-                text = "SOOMI",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
-            )
-        },
-        actions = {
-            IconButton(onClick = onSoundTestClick) {
-                Icon(Icons.Default.MusicNote, contentDescription = "Klangtest")
-            }
-            IconButton(onClick = onProgressClick) {
-                Icon(Icons.Default.CalendarMonth, contentDescription = "Fortschritt")
-            }
-            IconButton(onClick = onSettingsClick) {
-                Icon(Icons.Default.Settings, contentDescription = "Einstellungen")
-            }
-        },
-        colors = TopAppBarDefaults.topAppBarColors(
-            containerColor = MaterialTheme.colorScheme.background
-        )
-    )
-}
-
 // ============================================================================
-// UI State & ViewModel
+// ViewModel
 // ============================================================================
 
 data class TonightUiState(
     val isRunning: Boolean = false,
-    val state: SoomiState = SoomiState.IDLE,
+    val state: SoomiState = SoomiState.STOPPED,
     val currentScore: UnrestScore = UnrestScore(0f),
     val currentLevel: InterventionLevel = InterventionLevel.OFF,
     val baselineMode: BaselineMode = BaselineMode.GENTLE,
-    val showPermissionDialog: Boolean = false,
     val soundLevel: Float = 0f,
-    val isCalmingActive: Boolean = false
+    val cooldownRemaining: Int = 0,
+    val selectedProfile: SoundProfile = SoundProfile.DEFAULT
 )
 
 class TonightViewModel(
@@ -793,12 +823,9 @@ class TonightViewModel(
     private var bound = false
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
-    // Audio für Baseline Sound
     private var baselineAudioOutput: AudioOutputEngine? = null
     private var audioRecord: AudioRecord? = null
     private var listeningJob: Job? = null
-
-    // Audio für Sound Test
     private var testAudioOutput: AudioOutputEngine? = null
 
     private val connection = object : ServiceConnection {
@@ -819,6 +846,12 @@ class TonightViewModel(
         scope.launch {
             settingsRepository.baselineMode.collect { mode ->
                 _uiState.value = _uiState.value.copy(baselineMode = mode)
+            }
+        }
+        
+        scope.launch {
+            settingsRepository.soundProfile.collect { profile ->
+                _uiState.value = _uiState.value.copy(selectedProfile = profile)
             }
         }
 
@@ -906,18 +939,12 @@ class TonightViewModel(
         audioRecord = null
     }
 
-    /**
-     * Baseline Sound Auswahl - startet Sound SOFORT
-     */
     fun setBaselineModeWithSound(mode: BaselineMode) {
         _uiState.value = _uiState.value.copy(baselineMode = mode)
         
-        // Sound sofort starten/stoppen
         try {
             when (mode) {
-                BaselineMode.OFF -> {
-                    baselineAudioOutput?.stop()
-                }
+                BaselineMode.OFF -> baselineAudioOutput?.stop()
                 BaselineMode.GENTLE -> {
                     baselineAudioOutput?.apply {
                         stop()
@@ -937,12 +964,10 @@ class TonightViewModel(
             e.printStackTrace()
         }
 
-        // Settings speichern
         scope.launch {
             settingsRepository.setBaselineMode(mode)
         }
 
-        // Service informieren falls aktiv
         service?.setBaselineMode(mode)
     }
 
@@ -988,12 +1013,16 @@ class TonightViewModel(
                     _uiState.value = _uiState.value.copy(currentLevel = level)
                 }
             }
+            scope.launch {
+                svc.cooldownRemaining.collect { remaining ->
+                    _uiState.value = _uiState.value.copy(cooldownRemaining = remaining)
+                }
+            }
         }
     }
 
     fun startSession(context: Context) {
         try {
-            // Baseline Audio stoppen - Service übernimmt
             baselineAudioOutput?.stop()
             SoomiService.startService(context)
         } catch (e: Exception) {
@@ -1006,7 +1035,6 @@ class TonightViewModel(
             if (_uiState.value.isRunning) {
                 SoomiService.stopService(context)
             }
-            // Baseline Audio auch stoppen
             baselineAudioOutput?.stop()
             _uiState.value = _uiState.value.copy(baselineMode = BaselineMode.OFF)
             scope.launch {
@@ -1020,9 +1048,4 @@ class TonightViewModel(
     fun setBaselineMode(mode: BaselineMode) {
         setBaselineModeWithSound(mode)
     }
-
-    fun dismissPermissionDialog() {
-        _uiState.value = _uiState.value.copy(showPermissionDialog = false)
-    }
 }
-

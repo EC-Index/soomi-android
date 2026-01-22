@@ -6,6 +6,8 @@ import java.time.LocalDate
 /**
  * Core domain models for SOOMI
  * These represent the business logic concepts, independent of storage or UI.
+ * 
+ * v2.6: Simplified state machine with LISTENING, SOOTHING, COOLDOWN, STOPPED
  */
 
 /**
@@ -38,11 +40,27 @@ data class UnrestScore(
 
 /**
  * Baseline audio mode - what plays continuously (if anything)
+ * This is a separate "layer" from intervention sounds
  */
 enum class BaselineMode {
     OFF,      // No continuous audio
     GENTLE,   // Very soft background noise
     MEDIUM    // Moderate background noise
+}
+
+/**
+ * SOOMI State Machine States (v2.6 - Simplified)
+ * 
+ * STOPPED   - Session not running
+ * LISTENING - Session active, monitoring, only baseline playing (if enabled)
+ * SOOTHING  - Intervention sound playing (baby is/was unruhig)
+ * COOLDOWN  - Baby is calm, but sound continues with countdown timer
+ */
+enum class SoomiState {
+    STOPPED,    // Session not running
+    LISTENING,  // Monitoring, baseline only
+    SOOTHING,   // Intervention active
+    COOLDOWN    // Post-calm countdown, sound still playing
 }
 
 /**
@@ -73,7 +91,7 @@ enum class InterventionLevel(val volumeMultiplier: Float) {
 }
 
 /**
- * Types of soothing sounds available
+ * Types of soothing sounds available (legacy, replaced by SoundProfile)
  */
 enum class SoundType {
     BROWN_NOISE,    // Deep, rumbling noise - very soothing for babies
@@ -82,16 +100,42 @@ enum class SoundType {
 }
 
 /**
- * State machine states for the intervention engine
+ * Configuration thresholds for the intervention engine (v2.6)
  */
-enum class SoomiState {
-    IDLE,           // Not running
-    BASELINE,       // Running with baseline only (if enabled), monitoring
-    EARLY_SMOOTH,   // Detected mild unrest, applying gentle intervention
-    CRISIS,         // Detected sudden/severe crying, stronger intervention
-    COOLDOWN,       // Post-intervention waiting period
-    PAUSED          // User paused (panic stop or manual)
-}
+data class InterventionConfig(
+    // Thresholds
+    val startThreshold: Float = 70f,        // Unruhe >= this starts SOOTHING
+    val calmThreshold: Float = 35f,         // Unruhe <= this triggers COOLDOWN
+    val retriggerThreshold: Float = 55f,    // Unruhe >= this during COOLDOWN re-triggers SOOTHING
+    
+    // Timing (in seconds)
+    val startConfirmSec: Int = 2,           // How long above startThreshold to confirm
+    val calmConfirmSec: Int = 3,            // How long below calmThreshold to confirm
+    val cooldownSec: Int = 20,              // Cooldown duration
+    val retriggerConfirmSec: Int = 1,       // How long above retriggerThreshold to re-trigger
+    val minSoothingSec: Int = 10,           // Minimum soothing duration (anti-flicker)
+    
+    // Escalation limits
+    val maxEscalationsPerEvent: Int = 2,    // Max level increases per unrest event
+    
+    // Volume
+    val volumeCap: Float = 0.85f            // Maximum volume multiplier
+)
+
+/**
+ * Legacy ThresholdConfig for compatibility
+ */
+data class ThresholdConfig(
+    val zEarlyThreshold: Float = 15f,
+    val zCrisisThreshold: Float = 80f,
+    val zStopThreshold: Float = 10f,
+    val earlyConfirmationWindowMs: Long = 2000,
+    val crisisRiseTimeMs: Long = 1000,
+    val evaluationTimeMs: Long = 12000,
+    val cooldownTimeMs: Long = 45000,
+    val improvementThreshold: Float = 10f,
+    val volumeCap: Float = 0.85f
+)
 
 /**
  * Represents a complete overnight session
@@ -104,7 +148,7 @@ data class Session(
     val unrestEvents: Int = 0,
     val totalSoothingTimeSeconds: Long = 0,
     val peakUnrestScore: Float = 0f,
-    val manualInterventions: Int = 0,  // Soothe Now or Panic Stop
+    val manualInterventions: Int = 0,
     val panicStops: Int = 0,
     val date: LocalDate = LocalDate.now()
 )
@@ -127,10 +171,10 @@ data class UnrestEvent(
     val startTime: Instant,
     val endTime: Instant? = null,
     val peakScore: Float,
-    val triggerState: SoomiState,  // What state it triggered (EARLY_SMOOTH or CRISIS)
+    val triggerState: SoomiState,
     val interventionUsed: SoundType,
     val interventionLevel: InterventionLevel,
-    val deltaZ: Float? = null,  // Improvement achieved (positive = better)
+    val deltaZ: Float? = null,
     val wasEffective: Boolean? = null
 )
 
@@ -178,21 +222,6 @@ data class NightSummary(
 enum class ProgressTrend { IMPROVING, STABLE, WORSE }
 
 /**
- * Configuration thresholds (adjustable in settings)
- */
-data class ThresholdConfig(
-    val zEarlyThreshold: Float = 15f,      // Z10/Z20 - when to start gentle intervention
-    val zCrisisThreshold: Float = 80f,      // When to trigger crisis mode
-    val zStopThreshold: Float = 10f,        // When to stop intervention
-    val earlyConfirmationWindowMs: Long = 2000,  // How long Z must stay elevated
-    val crisisRiseTimeMs: Long = 1000,      // How fast Z must rise for crisis
-    val evaluationTimeMs: Long = 12000,     // Time to evaluate effectiveness
-    val cooldownTimeMs: Long = 45000,       // Wait time after intervention
-    val improvementThreshold: Float = 10f,  // ΔZ needed to count as effective
-    val volumeCap: Float = 0.85f            // Maximum volume multiplier
-)
-
-/**
  * Telemetry event (only collected if user opts in)
  */
 data class TelemetryEvent(
@@ -200,41 +229,18 @@ data class TelemetryEvent(
     val timestamp: Instant,
     val sessionId: Long,
     val metadata: Map<String, Any> = emptyMap()
-) {
-    // Never include raw audio data
-    companion object {
-        fun stateChange(from: SoomiState, to: SoomiState, sessionId: Long) = TelemetryEvent(
-            eventType = "state_change",
-            timestamp = Instant.now(),
-            sessionId = sessionId,
-            metadata = mapOf("from" to from.name, "to" to to.name)
-        )
-        
-        fun interventionResult(effective: Boolean, deltaZ: Float, sessionId: Long) = TelemetryEvent(
-            eventType = "intervention_result",
-            timestamp = Instant.now(),
-            sessionId = sessionId,
-            metadata = mapOf("effective" to effective, "delta_z" to deltaZ)
-        )
-    }
-}
+)
 
 // ============================================================================
 // Audio Output Routing Models
 // ============================================================================
 
-/**
- * Audio output device type selection
- */
 enum class OutputDeviceType {
-    PHONE_SPEAKER,    // Built-in phone speaker (default)
-    BLUETOOTH,        // Connected Bluetooth speaker (A2DP)
-    AUTO              // Automatic: prefer Bluetooth if available, else phone speaker
+    PHONE_SPEAKER,
+    BLUETOOTH,
+    AUTO
 }
 
-/**
- * Represents an available audio output device
- */
 data class AudioOutputDevice(
     val id: Int,
     val name: String,
@@ -253,9 +259,6 @@ data class AudioOutputDevice(
     }
 }
 
-/**
- * Audio routing event for logging/debugging
- */
 data class AudioRoutingEvent(
     val timestamp: Instant = Instant.now(),
     val eventType: AudioRoutingEventType,
@@ -265,23 +268,20 @@ data class AudioRoutingEvent(
 )
 
 enum class AudioRoutingEventType {
-    DEVICE_SELECTED,          // User or auto selected a device
-    DEVICE_CONNECTED,         // New device became available
-    DEVICE_DISCONNECTED,      // Device was disconnected
-    FALLBACK_TRIGGERED,       // Had to fall back to another device
-    AUDIO_FOCUS_LOST,         // Another app took audio focus
-    AUDIO_FOCUS_GAINED,       // Regained audio focus
-    OUTPUT_FAILED,            // Failed to initialize output
-    OUTPUT_RECOVERED          // Recovered from failure
+    DEVICE_SELECTED,
+    DEVICE_CONNECTED,
+    DEVICE_DISCONNECTED,
+    FALLBACK_TRIGGERED,
+    AUDIO_FOCUS_LOST,
+    AUDIO_FOCUS_GAINED,
+    OUTPUT_FAILED,
+    OUTPUT_RECOVERED
 }
 
-/**
- * Audio focus state
- */
 enum class AudioFocusState {
-    NONE,           // No focus requested
-    GAINED,         // Have full audio focus
-    LOST_TRANSIENT, // Lost temporarily (e.g., notification)
-    LOST_PERMANENT, // Lost permanently (e.g., phone call)
-    DUCKED          // Should lower volume
+    NONE,
+    GAINED,
+    LOST_TRANSIENT,
+    LOST_PERMANENT,
+    DUCKED
 }

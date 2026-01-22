@@ -20,26 +20,22 @@ import com.soomi.baby.domain.model.*
 import com.soomi.baby.ui.MainActivity
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import java.util.Timer
+import java.util.TimerTask
 
 /**
- * SoomiService
+ * SoomiService v2.6
  *
- * Foreground service that runs overnight baby monitoring.
+ * Foreground service for overnight baby monitoring.
+ * 
+ * v2.6 Changes:
+ * - New state machine: STOPPED, LISTENING, SOOTHING, COOLDOWN
+ * - Cooldown timer with countdown
+ * - Sound continues during cooldown
  *
  * PRIVACY:
  * - Processes audio in memory only
  * - Never records or stores raw audio
- * - Shows notification to user that service is running
- * - All processing is local, no network required
- *
- * Battery optimization:
- * - Uses efficient audio processing
- * - Holds partial wake lock only when needed
- * - Releases resources when stopped
- * 
- * AUDIO FEEDBACK PREVENTION:
- * - Informs AudioFeatureExtractor when playback is active
- * - Uses playback level to adjust noise baseline
  */
 class SoomiService : Service() {
 
@@ -75,7 +71,6 @@ class SoomiService : Service() {
         }
     }
 
-    // Binder for activity communication
     private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
@@ -98,15 +93,18 @@ class SoomiService : Service() {
     private var currentSessionId: Long? = null
     private var processingJob: Job? = null
     private var serviceScope: CoroutineScope? = null
+    
+    // Cooldown timer
+    private var cooldownTimer: Timer? = null
 
-    // Wake lock for overnight operation
+    // Wake lock
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Observable state
     private val _currentScore = MutableStateFlow(UnrestScore(0f))
     val currentScore: StateFlow<UnrestScore> = _currentScore.asStateFlow()
 
-    private val _sessionState = MutableStateFlow(SoomiState.IDLE)
+    private val _sessionState = MutableStateFlow(SoomiState.STOPPED)
     val sessionState: StateFlow<SoomiState> = _sessionState.asStateFlow()
 
     private val _currentLevel = MutableStateFlow(InterventionLevel.OFF)
@@ -114,6 +112,9 @@ class SoomiService : Service() {
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
+    
+    private val _cooldownRemaining = MutableStateFlow(0)
+    val cooldownRemaining: StateFlow<Int> = _cooldownRemaining.asStateFlow()
 
     // Stats tracking
     private var sessionStartTime = 0L
@@ -124,7 +125,6 @@ class SoomiService : Service() {
     private var manualInterventionCount = 0
     private var panicStopCount = 0
     
-    // Track current playback state for feedback prevention
     private var isPlaybackActive = false
     private var currentPlaybackLevel = 0f
 
@@ -133,15 +133,12 @@ class SoomiService : Service() {
         Log.d(TAG, "Service onCreate")
 
         try {
-            // Create a new scope for this service instance
             serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-            // Initialize audio components
             audioInput = AudioInputEngine(this)
             audioOutput = AudioOutputEngine()
             featureExtractor = AudioFeatureExtractor.createDefault()
 
-            // Initialize intervention engine with learning callback
             interventionEngine = InterventionEngine(
                 audioOutput = audioOutput!!,
                 learningCallback = createLearningCallback()
@@ -158,8 +155,13 @@ class SoomiService : Service() {
             serviceScope?.launch {
                 interventionEngine?.currentLevel?.collect { level ->
                     _currentLevel.value = level
-                    // Inform feature extractor about playback level
                     updatePlaybackState(level)
+                }
+            }
+            
+            serviceScope?.launch {
+                interventionEngine?.cooldownRemaining?.collect { remaining ->
+                    _cooldownRemaining.value = remaining
                 }
             }
         } catch (e: Exception) {
@@ -185,6 +187,7 @@ class SoomiService : Service() {
         Log.d(TAG, "Service onDestroy")
         try {
             stopSession()
+            cooldownTimer?.cancel()
             serviceScope?.cancel()
             serviceScope = null
         } catch (e: Exception) {
@@ -193,16 +196,11 @@ class SoomiService : Service() {
         super.onDestroy()
     }
     
-    /**
-     * Update playback state and inform feature extractor
-     * This helps prevent audio feedback from affecting baby detection
-     */
     private fun updatePlaybackState(level: InterventionLevel) {
         val wasPlaying = isPlaybackActive
         isPlaybackActive = level != InterventionLevel.OFF
         currentPlaybackLevel = level.volumeMultiplier
         
-        // Inform feature extractor
         featureExtractor?.setPlaybackActive(isPlaybackActive, currentPlaybackLevel)
         
         if (wasPlaying != isPlaybackActive) {
@@ -210,9 +208,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Start a new monitoring session
-     */
     fun startSession() {
         if (_isRunning.value) {
             Log.d(TAG, "Session already running")
@@ -222,39 +217,44 @@ class SoomiService : Service() {
         Log.d(TAG, "Starting session")
 
         try {
-            // Start foreground service with notification
             startForegroundWithNotification()
-
-            // Acquire wake lock for overnight operation
             acquireWakeLock()
 
             serviceScope?.launch {
                 try {
-                    // Get current settings
                     val baselineMode = settingsRepository.baselineMode.first()
                     val config = settingsRepository.thresholdConfig.first()
 
-                    // Create session in database
                     currentSessionId = sessionRepository.startSession(baselineMode)
 
-                    // Reset stats
                     resetStats()
                     sessionStartTime = System.currentTimeMillis()
 
-                    // Configure intervention engine
-                    interventionEngine?.config = config
+                    // Configure intervention engine with new config
+                    interventionEngine?.config = InterventionConfig(
+                        startThreshold = 70f,
+                        calmThreshold = 35f,
+                        retriggerThreshold = 55f,
+                        startConfirmSec = 2,
+                        calmConfirmSec = 3,
+                        cooldownSec = 20,
+                        retriggerConfirmSec = 1,
+                        minSoothingSec = 10,
+                        maxEscalationsPerEvent = 2,
+                        volumeCap = config.volumeCap
+                    )
                     interventionEngine?.setBaselineMode(baselineMode)
 
-                    // Start audio processing
                     audioInput?.startCapture()
                     interventionEngine?.start()
                     
-                    // Initial playback state
+                    // Start cooldown timer (runs every second)
+                    startCooldownTimer()
+                    
                     updatePlaybackState(_currentLevel.value)
 
                     _isRunning.value = true
 
-                    // Start processing audio
                     startAudioProcessing()
 
                 } catch (e: SecurityException) {
@@ -270,12 +270,9 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Stop the current session
-     */
     fun stopSession() {
         if (!_isRunning.value) {
-            Log.d(TAG, "Session not running, nothing to stop")
+            Log.d(TAG, "Session not running")
             stopForegroundAndSelf()
             return
         }
@@ -285,18 +282,18 @@ class SoomiService : Service() {
         _isRunning.value = false
 
         try {
-            // Stop audio processing first
             processingJob?.cancel()
             processingJob = null
+            
+            cooldownTimer?.cancel()
+            cooldownTimer = null
             
             audioInput?.stopCapture()
             interventionEngine?.stop()
             
-            // Clear playback state
             isPlaybackActive = false
             currentPlaybackLevel = 0f
 
-            // Finalize session in database (in a separate scope that won't be cancelled)
             val sessionId = currentSessionId
             val soothingMs = totalSoothingMs
             val events = unrestEventCount
@@ -307,10 +304,8 @@ class SoomiService : Service() {
             GlobalScope.launch(Dispatchers.IO) {
                 try {
                     sessionId?.let { id ->
-                        // Flush any remaining samples
                         sessionRepository.flushSamples()
 
-                        // Update final stats
                         val finalSoothingSeconds = soothingMs / 1000
                         sessionRepository.updateSessionStats(
                             sessionId = id,
@@ -321,7 +316,6 @@ class SoomiService : Service() {
                             panicStops = panic
                         )
 
-                        // End session
                         sessionRepository.endSession(id)
                     }
                 } catch (e: Exception) {
@@ -335,10 +329,7 @@ class SoomiService : Service() {
             Log.e(TAG, "Error stopping audio components", e)
         }
 
-        // Release wake lock
         releaseWakeLock()
-
-        // Stop foreground service
         stopForegroundAndSelf()
     }
 
@@ -351,37 +342,20 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Panic stop - immediate silence
-     */
     fun panicStop() {
         panicStopCount++
         try {
             interventionEngine?.panicStop()
+            _cooldownRemaining.value = 0
             isPlaybackActive = false
             currentPlaybackLevel = 0f
             featureExtractor?.setPlaybackActive(false, 0f)
-            updateNotification("Paused - tap to resume")
+            updateNotification("Pausiert - tippen zum Fortsetzen")
         } catch (e: Exception) {
             Log.e(TAG, "Error in panicStop", e)
         }
     }
 
-    /**
-     * Resume from paused state
-     */
-    fun resume() {
-        try {
-            interventionEngine?.resume()
-            updateNotification("Monitoring locally")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error in resume", e)
-        }
-    }
-
-    /**
-     * Manual soothe trigger
-     */
     fun manualSoothe() {
         manualInterventionCount++
         try {
@@ -391,9 +365,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Change baseline mode during session
-     */
     fun setBaselineMode(mode: BaselineMode) {
         try {
             interventionEngine?.setBaselineMode(mode)
@@ -404,17 +375,23 @@ class SoomiService : Service() {
             Log.e(TAG, "Error setting baseline mode", e)
         }
     }
+    
+    private fun startCooldownTimer() {
+        cooldownTimer?.cancel()
+        cooldownTimer = Timer()
+        cooldownTimer?.scheduleAtFixedRate(object : TimerTask() {
+            override fun run() {
+                interventionEngine?.updateCooldownTimer()
+            }
+        }, 1000, 1000) // Every second
+    }
 
-    /**
-     * Main audio processing loop
-     */
     private fun startAudioProcessing() {
         processingJob = serviceScope?.launch {
             try {
                 audioInput?.audioSamples?.collect { samples ->
                     if (!_isRunning.value) return@collect
 
-                    // Extract features and compute score
                     val features = featureExtractor?.extractFeatures(samples) ?: return@collect
                     val scoreValue = featureExtractor?.computeUnrestScore(features) ?: return@collect
                     val trend = featureExtractor?.getScoreTrend() ?: UnrestScore.Trend.STABLE
@@ -427,15 +404,12 @@ class SoomiService : Service() {
 
                     _currentScore.value = score
 
-                    // Track peak
                     if (scoreValue > peakScore) {
                         peakScore = scoreValue
                     }
 
-                    // Feed to intervention engine
                     interventionEngine?.processScore(score)
 
-                    // Record sample for history
                     currentSessionId?.let { sessionId ->
                         sessionRepository.recordScoreSample(
                             sessionId = sessionId,
@@ -452,38 +426,34 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Handle state changes for tracking
-     */
     private fun handleStateChange(state: SoomiState) {
         try {
             when (state) {
-                SoomiState.EARLY_SMOOTH, SoomiState.CRISIS -> {
-                    // Started soothing
+                SoomiState.SOOTHING -> {
                     if (soothingStartTime == 0L) {
                         soothingStartTime = System.currentTimeMillis()
                         unrestEventCount++
                     }
-                    updateNotification(if (state == SoomiState.CRISIS) "Soothing (high)" else "Soothing")
+                    updateNotification("Beruhigung aktiv")
                 }
-                SoomiState.BASELINE, SoomiState.COOLDOWN -> {
-                    // Stopped soothing
+                SoomiState.COOLDOWN -> {
+                    updateNotification("Abklingzeit läuft")
+                }
+                SoomiState.LISTENING -> {
                     if (soothingStartTime > 0) {
                         totalSoothingMs += System.currentTimeMillis() - soothingStartTime
                         soothingStartTime = 0L
                     }
-                    updateNotification("Monitoring locally")
+                    updateNotification("Überwacht lokal")
                 }
-                SoomiState.PAUSED -> {
+                SoomiState.STOPPED -> {
                     if (soothingStartTime > 0) {
                         totalSoothingMs += System.currentTimeMillis() - soothingStartTime
                         soothingStartTime = 0L
                     }
                 }
-                else -> {}
             }
 
-            // Log FSM transition
             currentSessionId?.let { sessionId ->
                 sessionRepository.logFsmTransition(
                     sessionId = sessionId,
@@ -497,9 +467,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Create learning callback for intervention engine
-     */
     private fun createLearningCallback() = object : InterventionEngine.LearningCallback {
         override fun onInterventionComplete(
             soundType: SoundType,
@@ -534,12 +501,9 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Start foreground service with notification
-     */
     private fun startForegroundWithNotification() {
         try {
-            val notification = createNotification("Monitoring locally")
+            val notification = createNotification("Überwacht lokal")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
@@ -555,9 +519,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Create notification for foreground service
-     */
     private fun createNotification(text: String): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -567,7 +528,6 @@ class SoomiService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Panic stop action
         val panicIntent = Intent(this, SoomiService::class.java).apply {
             action = ACTION_PANIC_STOP
         }
@@ -577,7 +537,7 @@ class SoomiService : Service() {
         )
 
         return NotificationCompat.Builder(this, SoomiApplication.CHANNEL_SERVICE)
-            .setContentTitle("SOOMI")
+            .setContentTitle("soomi Baby")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notification)
             .setOngoing(true)
@@ -588,9 +548,6 @@ class SoomiService : Service() {
             .build()
     }
 
-    /**
-     * Update notification text
-     */
     private fun updateNotification(text: String) {
         try {
             val notification = createNotification(text)
@@ -601,9 +558,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Acquire wake lock for overnight operation
-     */
     private fun acquireWakeLock() {
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -611,16 +565,13 @@ class SoomiService : Service() {
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "SOOMI::MonitoringWakeLock"
             ).apply {
-                acquire(8 * 60 * 60 * 1000L)  // 8 hours max
+                acquire(8 * 60 * 60 * 1000L)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error acquiring wake lock", e)
         }
     }
 
-    /**
-     * Release wake lock
-     */
     private fun releaseWakeLock() {
         try {
             wakeLock?.let {
@@ -634,9 +585,6 @@ class SoomiService : Service() {
         }
     }
 
-    /**
-     * Reset session stats
-     */
     private fun resetStats() {
         totalSoothingMs = 0
         soothingStartTime = 0

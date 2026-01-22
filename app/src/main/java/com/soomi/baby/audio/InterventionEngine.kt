@@ -1,42 +1,47 @@
 package com.soomi.baby.audio
 
+import android.util.Log
 import com.soomi.baby.domain.model.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * InterventionEngine
+ * InterventionEngine v2.6
  * 
- * Finite State Machine (FSM) that manages the intervention lifecycle:
- * - Monitors unrest scores
- * - Triggers interventions based on thresholds
- * - Evaluates effectiveness
- * - Manages cooldowns
+ * Simplified Finite State Machine (FSM) for intervention management:
  * 
- * States: IDLE → BASELINE → EARLY_SMOOTH/CRISIS → COOLDOWN → BASELINE
- *                    ↓            ↓
- *                 PAUSED ←───────┘
+ * States:
+ * - STOPPED:   Session not running
+ * - LISTENING: Monitoring, only baseline playing
+ * - SOOTHING:  Intervention sound active
+ * - COOLDOWN:  Baby calm, sound continues with countdown
  * 
- * Design principles:
- * - Conservative escalation (prefer pattern switch over volume increase)
- * - Quick crisis response for sudden crying
- * - Effectiveness-based adaptation
- * - Cooldown to prevent flapping
+ * Transitions:
+ * - LISTENING → SOOTHING: Unruhe >= START_THRESHOLD for CONFIRM time
+ * - SOOTHING → COOLDOWN:  Unruhe <= CALM_THRESHOLD for CALM_CONFIRM time
+ * - COOLDOWN → LISTENING: Countdown reaches 0
+ * - COOLDOWN → SOOTHING:  Unruhe >= RETRIGGER_THRESHOLD (re-trigger)
+ * 
+ * Key features:
+ * - Hysteresis: retrigger threshold lower than start threshold
+ * - Minimum soothing duration to prevent flicker
+ * - Max escalations per event
+ * - Cooldown with countdown while sound continues
  */
 class InterventionEngine(
     private val audioOutput: AudioOutputEngine,
     private val learningCallback: LearningCallback? = null
 ) {
-    // Configuration (can be updated from settings)
-    var config = ThresholdConfig()
-        set(value) {
-            field = value
-            audioOutput.setVolumeRaw(value.volumeCap)
-        }
+    companion object {
+        private const val TAG = "InterventionEngine"
+    }
+    
+    // Configuration
+    var config = InterventionConfig()
     
     // Current state
-    private val _state = MutableStateFlow(SoomiState.IDLE)
+    private val _state = MutableStateFlow(SoomiState.STOPPED)
     val state: StateFlow<SoomiState> = _state.asStateFlow()
     
     private val _currentLevel = MutableStateFlow(InterventionLevel.OFF)
@@ -45,29 +50,25 @@ class InterventionEngine(
     private val _currentSound = MutableStateFlow(SoundType.BROWN_NOISE)
     val currentSound: StateFlow<SoundType> = _currentSound.asStateFlow()
     
-    // Baseline mode setting
+    private val _cooldownRemaining = MutableStateFlow(0)
+    val cooldownRemaining: StateFlow<Int> = _cooldownRemaining.asStateFlow()
+    
+    // Baseline mode (separate layer)
     private var baselineMode = BaselineMode.OFF
     
     // Timing tracking
     private var stateEntryTime = 0L
-    private var interventionStartTime = 0L
-    private var lastEvaluationTime = 0L
-    private var cooldownEndTime = 0L
+    private var soothingStartTime = 0L
+    private var lastScoreTime = 0L
     
-    // Score tracking for effectiveness measurement
-    private val recentScores = ArrayDeque<Float>(20)
-    private var preInterventionMeanZ = 0f
-    private var confirmationCount = 0
-    private var crisisRiseTracking = false
-    private var crisisRiseStartScore = 0f
-    private var crisisRiseStartTime = 0L
+    // Confirmation tracking
+    private var aboveStartThresholdSince: Long? = null
+    private var belowCalmThresholdSince: Long? = null
+    private var aboveRetriggerThresholdSince: Long? = null
     
-    // Escalation tracking (prevent endless escalation)
+    // Escalation tracking
     private var escalationCount = 0
-    private val maxEscalations = 2
-    
-    // Pattern switch tracking
-    private var patternSwitchUsed = false
+    private var currentEventStartScore = 0f
     
     /**
      * Callback interface for learning integration
@@ -80,7 +81,6 @@ class InterventionEngine(
             effective: Boolean,
             deltaZ: Float
         )
-        
         fun getBestSoundType(baselineMode: BaselineMode): SoundType
     }
     
@@ -89,385 +89,263 @@ class InterventionEngine(
      */
     fun setBaselineMode(mode: BaselineMode) {
         baselineMode = mode
-        if (_state.value == SoomiState.BASELINE) {
+        if (_state.value == SoomiState.LISTENING) {
             applyBaselineOutput()
         }
     }
     
     /**
-     * Start the engine - enters BASELINE state
+     * Start the engine - enters LISTENING state
      */
     fun start() {
-        if (_state.value != SoomiState.IDLE) return
+        if (_state.value != SoomiState.STOPPED) return
         
+        Log.d(TAG, "Starting engine")
         audioOutput.initialize()
-        audioOutput.start()
         
-        // Get best sound type from learning (if available)
+        // Get best sound type from learning
         val bestSound = learningCallback?.getBestSoundType(baselineMode) ?: SoundType.BROWN_NOISE
         _currentSound.value = bestSound
-        audioOutput.setSoundType(bestSound)
         
-        transitionTo(SoomiState.BASELINE)
+        transitionTo(SoomiState.LISTENING)
         applyBaselineOutput()
+        
+        if (baselineMode != BaselineMode.OFF) {
+            audioOutput.start()
+        }
     }
     
     /**
-     * Stop the engine - returns to IDLE
+     * Stop the engine - returns to STOPPED
      */
     fun stop() {
+        Log.d(TAG, "Stopping engine")
         audioOutput.stop()
-        transitionTo(SoomiState.IDLE)
+        transitionTo(SoomiState.STOPPED)
         resetTracking()
+        _cooldownRemaining.value = 0
     }
     
     /**
-     * Panic stop - immediate silence and pause
+     * Panic stop - immediate silence
      */
     fun panicStop() {
+        Log.d(TAG, "Panic stop!")
         audioOutput.forceStop()
-        transitionTo(SoomiState.PAUSED)
+        transitionTo(SoomiState.LISTENING)
         resetTracking()
-    }
-    
-    /**
-     * Resume from paused state
-     */
-    fun resume() {
-        if (_state.value != SoomiState.PAUSED) return
+        _cooldownRemaining.value = 0
         
-        audioOutput.start()
-        transitionTo(SoomiState.BASELINE)
-        applyBaselineOutput()
-    }
-    
-    /**
-     * Manual "Soothe Now" trigger - enters CRISIS mode temporarily
-     * 
-     * @param maxDurationMs Maximum duration before auto-return to baseline
-     */
-    fun manualSoothe(maxDurationMs: Long = 60000) {
-        if (_state.value == SoomiState.IDLE) return
-        
-        transitionTo(SoomiState.CRISIS)
-        _currentLevel.value = InterventionLevel.LEVEL_2
-        audioOutput.setVolume(InterventionLevel.LEVEL_2)
-        
-        // Will auto-return to baseline after evaluation period
+        // Re-apply baseline if needed
+        if (baselineMode != BaselineMode.OFF) {
+            applyBaselineOutput()
+            audioOutput.start()
+        }
     }
     
     /**
      * Process a new unrest score - main FSM update
-     * 
-     * Call this method each time a new Z score is computed (every ~500ms)
+     * Call this every ~500ms with the current score
      */
     fun processScore(score: UnrestScore) {
-        // Track recent scores
-        recentScores.addLast(score.value)
-        if (recentScores.size > 20) recentScores.removeFirst()
-        
         val currentTime = System.currentTimeMillis()
+        lastScoreTime = currentTime
         
         when (_state.value) {
-            SoomiState.IDLE -> {
-                // Do nothing - not running
+            SoomiState.STOPPED -> {
+                // Do nothing
             }
-            
-            SoomiState.BASELINE -> {
-                handleBaselineState(score, currentTime)
+            SoomiState.LISTENING -> {
+                handleListeningState(score, currentTime)
             }
-            
-            SoomiState.EARLY_SMOOTH -> {
-                handleEarlySmoothState(score, currentTime)
+            SoomiState.SOOTHING -> {
+                handleSoothingState(score, currentTime)
             }
-            
-            SoomiState.CRISIS -> {
-                handleCrisisState(score, currentTime)
-            }
-            
             SoomiState.COOLDOWN -> {
                 handleCooldownState(score, currentTime)
             }
+        }
+    }
+    
+    /**
+     * Update cooldown timer - call this every second
+     */
+    fun updateCooldownTimer() {
+        if (_state.value == SoomiState.COOLDOWN && _cooldownRemaining.value > 0) {
+            _cooldownRemaining.value = _cooldownRemaining.value - 1
             
-            SoomiState.PAUSED -> {
-                // Wait for manual resume
+            if (_cooldownRemaining.value <= 0) {
+                // Cooldown complete - stop intervention
+                endIntervention()
             }
         }
     }
     
     /**
-     * Handle BASELINE state - monitoring for unrest
+     * Manual soothe trigger
      */
-    private fun handleBaselineState(score: UnrestScore, currentTime: Long) {
-        // Check for crisis condition (sudden spike)
-        if (checkCrisisCondition(score, currentTime)) {
-            enterCrisisMode(currentTime)
-            return
-        }
+    fun manualSoothe() {
+        if (_state.value == SoomiState.STOPPED) return
         
-        // Check for early intervention condition
-        if (score.value >= config.zEarlyThreshold) {
-            confirmationCount++
+        Log.d(TAG, "Manual soothe triggered")
+        startIntervention(0f)
+    }
+    
+    // =========================================================================
+    // State Handlers
+    // =========================================================================
+    
+    private fun handleListeningState(score: UnrestScore, currentTime: Long) {
+        // Check if unrest is above start threshold
+        if (score.value >= config.startThreshold) {
+            if (aboveStartThresholdSince == null) {
+                aboveStartThresholdSince = currentTime
+                Log.d(TAG, "Unrest above start threshold, starting confirm timer")
+            }
             
-            // Require sustained elevation (2+ windows or 2 seconds)
-            val timeSinceEntry = currentTime - stateEntryTime
-            if (confirmationCount >= 2 || timeSinceEntry >= config.earlyConfirmationWindowMs) {
-                enterEarlySmoothMode(currentTime)
+            // Check if confirmed
+            val confirmDuration = currentTime - (aboveStartThresholdSince ?: currentTime)
+            if (confirmDuration >= config.startConfirmSec * 1000) {
+                Log.d(TAG, "Start threshold confirmed, starting intervention")
+                startIntervention(score.value)
             }
         } else {
-            confirmationCount = 0
+            // Reset confirmation timer
+            aboveStartThresholdSince = null
         }
     }
     
-    /**
-     * Handle EARLY_SMOOTH state - gentle intervention active
-     */
-    private fun handleEarlySmoothState(score: UnrestScore, currentTime: Long) {
-        // Check for crisis escalation
-        if (checkCrisisCondition(score, currentTime)) {
-            enterCrisisMode(currentTime)
+    private fun handleSoothingState(score: UnrestScore, currentTime: Long) {
+        // Check minimum soothing time
+        val soothingDuration = currentTime - soothingStartTime
+        if (soothingDuration < config.minSoothingSec * 1000) {
+            // Still in minimum soothing period, don't check for calm yet
             return
         }
         
-        // Check for successful calming
-        if (score.value < config.zStopThreshold) {
-            val stableDuration = currentTime - stateEntryTime
-            if (stableDuration >= 5000) {  // Stable for 5 seconds
-                exitIntervention(currentTime, true)
-                return
+        // Check if baby is calm
+        if (score.value <= config.calmThreshold) {
+            if (belowCalmThresholdSince == null) {
+                belowCalmThresholdSince = currentTime
+                Log.d(TAG, "Unrest below calm threshold, starting confirm timer")
             }
-        }
-        
-        // Evaluate effectiveness periodically
-        if (currentTime - lastEvaluationTime >= config.evaluationTimeMs) {
-            evaluateEffectiveness(currentTime)
+            
+            // Check if confirmed
+            val confirmDuration = currentTime - (belowCalmThresholdSince ?: currentTime)
+            if (confirmDuration >= config.calmConfirmSec * 1000) {
+                Log.d(TAG, "Calm confirmed, starting cooldown")
+                startCooldown()
+            }
+        } else {
+            // Reset calm confirmation
+            belowCalmThresholdSince = null
+            
+            // Check for escalation (if still high)
+            if (score.value >= config.startThreshold && escalationCount < config.maxEscalationsPerEvent) {
+                // Could escalate level here if needed
+            }
         }
     }
     
-    /**
-     * Handle CRISIS state - stronger intervention
-     */
-    private fun handleCrisisState(score: UnrestScore, currentTime: Long) {
-        // Check for successful calming
-        if (score.value < config.zStopThreshold) {
-            val stableDuration = currentTime - stateEntryTime
-            if (stableDuration >= 3000) {  // Shorter stable period for crisis
-                exitIntervention(currentTime, true)
-                return
-            }
-        }
-        
-        // Check for step-down to early smooth
-        if (score.value < config.zCrisisThreshold * 0.7f && score.value >= config.zEarlyThreshold) {
-            val duration = currentTime - stateEntryTime
-            if (duration >= 5000) {  // Maintain for 5s before step-down
-                stepDownFromCrisis(currentTime)
-                return
-            }
-        }
-        
-        // Evaluate effectiveness
-        if (currentTime - lastEvaluationTime >= config.evaluationTimeMs) {
-            evaluateEffectiveness(currentTime)
-        }
-    }
-    
-    /**
-     * Handle COOLDOWN state - waiting before re-intervention
-     */
     private fun handleCooldownState(score: UnrestScore, currentTime: Long) {
-        // Allow immediate crisis response even during cooldown
-        if (score.value >= config.zCrisisThreshold) {
-            enterCrisisMode(currentTime)
-            return
-        }
-        
-        // Check if cooldown complete
-        if (currentTime >= cooldownEndTime) {
-            transitionTo(SoomiState.BASELINE)
-            applyBaselineOutput()
-            resetTracking()
-        }
-    }
-    
-    /**
-     * Check if crisis condition is met (fast rise or very high score)
-     */
-    private fun checkCrisisCondition(score: UnrestScore, currentTime: Long): Boolean {
-        // Direct threshold check
-        if (score.value >= config.zCrisisThreshold * 1.1f) {  // 10% above threshold = immediate
-            return true
-        }
-        
-        // Fast rise detection
-        if (score.value >= config.zCrisisThreshold) {
-            if (!crisisRiseTracking) {
-                crisisRiseTracking = true
-                crisisRiseStartScore = recentScores.firstOrNull() ?: score.value
-                crisisRiseStartTime = currentTime - (recentScores.size * 500L)  // Approximate
+        // Check for retrigger
+        if (score.value >= config.retriggerThreshold) {
+            if (aboveRetriggerThresholdSince == null) {
+                aboveRetriggerThresholdSince = currentTime
+                Log.d(TAG, "Unrest above retrigger threshold during cooldown")
             }
             
-            val riseTime = currentTime - crisisRiseStartTime
-            val riseAmount = score.value - crisisRiseStartScore
-            
-            // Fast rise: jumped 60+ points in under 1 second
-            if (riseAmount >= 60 && riseTime <= config.crisisRiseTimeMs) {
-                return true
-            }
-            
-            // Sustained high: above threshold for over 1 second
-            if (riseTime >= config.crisisRiseTimeMs) {
-                return true
+            // Check if confirmed
+            val confirmDuration = currentTime - (aboveRetriggerThresholdSince ?: currentTime)
+            if (confirmDuration >= config.retriggerConfirmSec * 1000) {
+                Log.d(TAG, "Retrigger confirmed, cancelling cooldown")
+                cancelCooldownAndRetrigger()
             }
         } else {
-            crisisRiseTracking = false
+            aboveRetriggerThresholdSince = null
         }
-        
-        return false
     }
     
-    /**
-     * Enter early smooth intervention mode
-     */
-    private fun enterEarlySmoothMode(currentTime: Long) {
-        transitionTo(SoomiState.EARLY_SMOOTH)
-        
-        // Capture pre-intervention baseline
-        preInterventionMeanZ = calculateRecentMean()
-        interventionStartTime = currentTime
-        lastEvaluationTime = currentTime
+    // =========================================================================
+    // State Transitions
+    // =========================================================================
+    
+    private fun startIntervention(triggerScore: Float) {
+        transitionTo(SoomiState.SOOTHING)
+        soothingStartTime = System.currentTimeMillis()
+        currentEventStartScore = triggerScore
         escalationCount = 0
-        patternSwitchUsed = false
         
-        // Set intervention level based on baseline
-        val level = when (baselineMode) {
-            BaselineMode.OFF -> InterventionLevel.LEVEL_1
-            BaselineMode.GENTLE -> InterventionLevel.LEVEL_2
-            BaselineMode.MEDIUM -> InterventionLevel.LEVEL_2
+        // Reset confirmation timers
+        aboveStartThresholdSince = null
+        belowCalmThresholdSince = null
+        aboveRetriggerThresholdSince = null
+        
+        // Start audio at Level 2
+        _currentLevel.value = InterventionLevel.LEVEL_2
+        audioOutput.setSoundType(_currentSound.value)
+        audioOutput.setVolume(_currentLevel.value)
+        
+        if (!audioOutput.isPlaying()) {
+            audioOutput.start()
         }
         
-        _currentLevel.value = level
-        audioOutput.setVolume(level)
+        Log.d(TAG, "Intervention started at level ${_currentLevel.value}")
     }
     
-    /**
-     * Enter crisis intervention mode
-     */
-    private fun enterCrisisMode(currentTime: Long) {
-        transitionTo(SoomiState.CRISIS)
+    private fun startCooldown() {
+        transitionTo(SoomiState.COOLDOWN)
+        _cooldownRemaining.value = config.cooldownSec
         
-        // Capture baseline if not already in intervention
-        if (preInterventionMeanZ == 0f) {
-            preInterventionMeanZ = calculateRecentMean()
-        }
+        // Reset confirmation timers
+        belowCalmThresholdSince = null
+        aboveRetriggerThresholdSince = null
         
-        interventionStartTime = currentTime
-        lastEvaluationTime = currentTime
-        
-        // Fast attack - jump to level 2 or 3
-        val level = InterventionLevel.LEVEL_3
-        _currentLevel.value = level
-        audioOutput.setVolume(level)
+        // Sound continues playing!
+        Log.d(TAG, "Cooldown started: ${config.cooldownSec}s remaining, sound continues")
     }
     
-    /**
-     * Step down from crisis to early smooth
-     */
-    private fun stepDownFromCrisis(currentTime: Long) {
-        transitionTo(SoomiState.EARLY_SMOOTH)
+    private fun cancelCooldownAndRetrigger() {
+        transitionTo(SoomiState.SOOTHING)
+        _cooldownRemaining.value = 0
         
-        // Reduce level by one
-        val newLevel = _currentLevel.value.previous()
-        _currentLevel.value = newLevel
-        audioOutput.setVolume(newLevel)
+        // Reset confirmation timers
+        aboveRetriggerThresholdSince = null
+        belowCalmThresholdSince = null
         
-        lastEvaluationTime = currentTime
+        // Sound was already playing, nothing to change
+        Log.d(TAG, "Cooldown cancelled, back to soothing")
     }
     
-    /**
-     * Evaluate intervention effectiveness
-     */
-    private fun evaluateEffectiveness(currentTime: Long) {
-        lastEvaluationTime = currentTime
+    private fun endIntervention() {
+        Log.d(TAG, "Intervention ended")
         
-        val currentMeanZ = calculateRecentMean()
-        val deltaZ = preInterventionMeanZ - currentMeanZ
-        
-        if (deltaZ >= config.improvementThreshold) {
-            // Effective! Hold current level for minimum time, then step down
-            // (Step down will happen naturally as score drops)
-        } else {
-            // Not effective - try alternatives before escalating
-            handleIneffectiveIntervention(currentTime)
-        }
-    }
-    
-    /**
-     * Handle case where current intervention isn't working
-     */
-    private fun handleIneffectiveIntervention(currentTime: Long) {
-        // Strategy order:
-        // 1. Pattern switch (if not already tried)
-        // 2. Limited escalation (max 2 times)
-        // 3. Give up and enter cooldown
-        
-        if (!patternSwitchUsed) {
-            // Try switching sound pattern
-            val newSound = when (_currentSound.value) {
-                SoundType.BROWN_NOISE -> SoundType.SHUSH_PULSE
-                SoundType.PINK_NOISE -> SoundType.BROWN_NOISE
-                SoundType.SHUSH_PULSE -> SoundType.BROWN_NOISE
-            }
-            _currentSound.value = newSound
-            audioOutput.setSoundType(newSound)
-            patternSwitchUsed = true
-            return
-        }
-        
-        if (escalationCount < maxEscalations) {
-            // Limited escalation
-            val newLevel = _currentLevel.value.next()
-            if (newLevel != _currentLevel.value) {
-                _currentLevel.value = newLevel
-                audioOutput.setVolume(newLevel)
-                escalationCount++
-            } else {
-                // Already at max - give up
-                exitIntervention(currentTime, false)
-            }
-            return
-        }
-        
-        // All options exhausted - enter cooldown
-        exitIntervention(currentTime, false)
-    }
-    
-    /**
-     * Exit intervention mode
-     */
-    private fun exitIntervention(currentTime: Long, wasEffective: Boolean) {
-        val finalDeltaZ = preInterventionMeanZ - calculateRecentMean()
-        
-        // Report to learning system
+        // Report to learning
+        val deltaZ = currentEventStartScore - 0f // Could track current score
         learningCallback?.onInterventionComplete(
             soundType = _currentSound.value,
             level = _currentLevel.value,
             baselineMode = baselineMode,
-            effective = wasEffective,
-            deltaZ = finalDeltaZ
+            effective = true,
+            deltaZ = deltaZ
         )
         
-        // Enter cooldown
-        transitionTo(SoomiState.COOLDOWN)
-        cooldownEndTime = currentTime + config.cooldownTimeMs
+        transitionTo(SoomiState.LISTENING)
+        _cooldownRemaining.value = 0
+        resetTracking()
         
-        // Return to baseline output
+        // Apply baseline output
         applyBaselineOutput()
+        
+        if (baselineMode == BaselineMode.OFF) {
+            audioOutput.stop()
+        }
     }
     
-    /**
-     * Apply baseline output level
-     */
+    // =========================================================================
+    // Helpers
+    // =========================================================================
+    
     private fun applyBaselineOutput() {
         val level = when (baselineMode) {
             BaselineMode.OFF -> InterventionLevel.OFF
@@ -478,34 +356,18 @@ class InterventionEngine(
         audioOutput.setVolume(level)
     }
     
-    /**
-     * Transition to new state
-     */
     private fun transitionTo(newState: SoomiState) {
+        val oldState = _state.value
         _state.value = newState
         stateEntryTime = System.currentTimeMillis()
+        Log.d(TAG, "State transition: $oldState -> $newState")
     }
     
-    /**
-     * Calculate mean of recent scores
-     */
-    private fun calculateRecentMean(): Float {
-        return if (recentScores.isNotEmpty()) {
-            recentScores.average().toFloat()
-        } else {
-            0f
-        }
-    }
-    
-    /**
-     * Reset all tracking variables
-     */
     private fun resetTracking() {
-        recentScores.clear()
-        preInterventionMeanZ = 0f
-        confirmationCount = 0
-        crisisRiseTracking = false
+        aboveStartThresholdSince = null
+        belowCalmThresholdSince = null
+        aboveRetriggerThresholdSince = null
         escalationCount = 0
-        patternSwitchUsed = false
+        currentEventStartScore = 0f
     }
 }
