@@ -43,14 +43,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * SOOMI 2.6 - Tonight Screen
+ * SOOMI 2.7 - Tonight Screen
  * 
- * v2.6 Changes:
- * - New state machine: STOPPED, LISTENING, SOOTHING, COOLDOWN
- * - "Unruhe 0" instead of "Z: 0"
- * - "Beruhigung starten/beenden" instead of "Sitzung starten/beenden"
- * - Cooldown countdown: "Abklingzeit: MM:SS"
- * - Sound continues during cooldown
+ * v2.7 Änderungen:
+ * - Unruhewert-Meter ersetzt Noise Level (0-100, Ruhig/Aktiv/Unruhig Zonen)
+ * - Status-Feld zeigt nur Interventionsstatus und Cooldown-Zeit
+ * - Nur ein Icon (Library) statt zwei
+ * - Sound-Fadeout während Cooldown
  */
 @Composable
 fun TonightScreen(
@@ -61,8 +60,6 @@ fun TonightScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
-
-    var showSoundDialog by remember { mutableStateOf(false) }
 
     // Permission handling
     var hasPermission by remember { mutableStateOf(false) }
@@ -91,25 +88,9 @@ fun TonightScreen(
         }
     }
 
-    if (showSoundDialog) {
-        SoundTestDialog(
-            onDismiss = { 
-                viewModel.stopTestSound()
-                showSoundDialog = false 
-            },
-            onPlaySound = { soundType, volume ->
-                viewModel.playTestSound(soundType, volume)
-            },
-            onStopSound = {
-                viewModel.stopTestSound()
-            }
-        )
-    }
-
     Scaffold(
         topBar = {
             TonightTopBar(
-                onSoundTestClick = { showSoundDialog = true },
                 onSoundLibraryClick = onNavigateToSoundLibrary,
                 onProgressClick = onNavigateToProgress,
                 onSettingsClick = onNavigateToSettings
@@ -125,30 +106,22 @@ fun TonightScreen(
         ) {
             Spacer(modifier = Modifier.height(24.dp))
 
-            // === MAIN STATUS DISPLAY ===
-            UnrestStatusDisplay(
-                state = uiState.state,
-                score = uiState.currentScore,
-                cooldownRemaining = uiState.cooldownRemaining,
+            // === v2.7: UNRUHEWERT METER (ersetzt Noise Level) ===
+            UnruhewertMeter(
+                value = uiState.currentScore.value,
                 isSessionActive = uiState.isRunning,
                 modifier = Modifier.fillMaxWidth()
             )
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // === SOUND LEVEL BAROMETER ===
-            if (hasPermission) {
-                SoundLevelBarometer(
-                    level = uiState.soundLevel,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            } else {
-                PermissionRequestCard(
-                    onRequestPermission = {
-                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }
-                )
-            }
+            // === v2.7: STATUS FIELD (nur Intervention + Cooldown) ===
+            InterventionStatusDisplay(
+                state = uiState.state,
+                cooldownRemaining = uiState.cooldownRemaining,
+                isSessionActive = uiState.isRunning,
+                modifier = Modifier.fillMaxWidth()
+            )
 
             Spacer(modifier = Modifier.height(32.dp))
 
@@ -164,7 +137,7 @@ fun TonightScreen(
                 onModeSelected = { mode ->
                     viewModel.setBaselineModeWithSound(mode)
                 },
-                enabled = !uiState.isRunning, // Disable during session
+                enabled = !uiState.isRunning,
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -178,6 +151,16 @@ fun TonightScreen(
             )
 
             Spacer(modifier = Modifier.weight(1f))
+
+            // === PERMISSION REQUEST IF NEEDED ===
+            if (!hasPermission) {
+                PermissionRequestCard(
+                    onRequestPermission = {
+                        permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+            }
 
             // === MAIN ACTION BUTTON ===
             SessionButton(
@@ -207,40 +190,178 @@ fun TonightScreen(
 }
 
 /**
- * Main status display showing state and unrest level
+ * v2.7: Unruhewert-Meter (ersetzt Noise Level Barometer)
+ * 
+ * Zeigt den Z-Wert von 0-100 mit Farbzonen:
+ * - Ruhig (grün): 0-35
+ * - Aktiv (gelb): 35-70
+ * - Unruhig (rot): 70-100
  */
 @Composable
-fun UnrestStatusDisplay(
+fun UnruhewertMeter(
+    value: Float,
+    isSessionActive: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val animatedValue by animateFloatAsState(
+        targetValue = if (isSessionActive) value else 0f,
+        animationSpec = tween(300),
+        label = "unruhewert"
+    )
+    
+    // Bestimme Zone und Farbe
+    val (zoneLabel, zoneColor) = when {
+        animatedValue < 35f -> "Ruhig" to SoomiCalm
+        animatedValue < 70f -> "Aktiv" to SoomiRising
+        else -> "Unruhig" to SoomiCrisis
+    }
+    
+    val animatedColor by animateColorAsState(
+        targetValue = if (isSessionActive) zoneColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f),
+        animationSpec = tween(500),
+        label = "zoneColor"
+    )
+
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Label
+        Text(
+            text = "Unruhewert",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        // Großer Wert in der Mitte
+        Text(
+            text = if (isSessionActive) animatedValue.toInt().toString() else "—",
+            style = MaterialTheme.typography.displayLarge,
+            fontWeight = FontWeight.Light,
+            color = animatedColor
+        )
+        
+        // Zone-Label
+        Text(
+            text = if (isSessionActive) zoneLabel else "Bereit",
+            style = MaterialTheme.typography.titleMedium,
+            color = animatedColor.copy(alpha = 0.8f)
+        )
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // Farbiger Balken mit Zonen
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(12.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            // Zonen-Hintergrund
+            Row(modifier = Modifier.fillMaxSize()) {
+                // Ruhig (0-35) = 35%
+                Box(
+                    modifier = Modifier
+                        .weight(0.35f)
+                        .fillMaxHeight()
+                        .background(SoomiCalm.copy(alpha = 0.2f))
+                )
+                // Aktiv (35-70) = 35%
+                Box(
+                    modifier = Modifier
+                        .weight(0.35f)
+                        .fillMaxHeight()
+                        .background(SoomiRising.copy(alpha = 0.2f))
+                )
+                // Unruhig (70-100) = 30%
+                Box(
+                    modifier = Modifier
+                        .weight(0.30f)
+                        .fillMaxHeight()
+                        .background(SoomiCrisis.copy(alpha = 0.2f))
+                )
+            }
+            
+            // Aktueller Wert-Indikator
+            if (isSessionActive && animatedValue > 0) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(fraction = (animatedValue / 100f).coerceIn(0f, 1f))
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(animatedColor)
+                )
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(8.dp))
+        
+        // Zone-Labels unter dem Balken
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "Ruhig",
+                style = MaterialTheme.typography.labelSmall,
+                color = SoomiCalm
+            )
+            Text(
+                text = "Aktiv",
+                style = MaterialTheme.typography.labelSmall,
+                color = SoomiRising
+            )
+            Text(
+                text = "Unruhig",
+                style = MaterialTheme.typography.labelSmall,
+                color = SoomiCrisis
+            )
+        }
+    }
+}
+
+/**
+ * v2.7: Status-Anzeige nur für Intervention und Cooldown
+ * Zeigt "Bereit" wenn keine Intervention läuft
+ */
+@Composable
+fun InterventionStatusDisplay(
     state: SoomiState,
-    score: UnrestScore,
     cooldownRemaining: Int,
     isSessionActive: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // Determine status based on state
-    val (statusText, statusColor, shouldPulse) = when (state) {
-        SoomiState.STOPPED, SoomiState.IDLE -> Triple("Bereit", SoomiOnBackgroundMuted, false)
-        SoomiState.LISTENING, SoomiState.BASELINE -> {
-            when {
-                score.value < 35f -> Triple("Baby ist ruhig", SoomiCalm, false)
-                score.value < 70f -> Triple("Baby bewegt sich", SoomiRising, false)
-                else -> Triple("Baby ist unruhig", SoomiCrisis, true)
-            }
+    // Bestimme Status basierend auf State
+    val (statusText, statusColor, showCountdown) = when {
+        !isSessionActive -> Triple("Bereit", SoomiOnBackgroundMuted, false)
+        state == SoomiState.SOOTHING -> Triple("Beruhigung aktiv", SoomiSoothing, false)
+        state == SoomiState.COOLDOWN && cooldownRemaining > 0 -> {
+            val minutes = cooldownRemaining / 60
+            val seconds = cooldownRemaining % 60
+            Triple(
+                "Abklingzeit: ${String.format("%02d:%02d", minutes, seconds)}",
+                SoomiCalm,
+                true
+            )
         }
-        SoomiState.SOOTHING -> Triple("Beruhigung aktiv", SoomiSoothing, true)
-        SoomiState.COOLDOWN -> Triple("Abklingzeit", SoomiCalm, false)
+        state == SoomiState.LISTENING || state == SoomiState.BASELINE -> Triple("Bereit", SoomiOnBackgroundMuted, false)
+        else -> Triple("Bereit", SoomiOnBackgroundMuted, false)
     }
 
     val animatedColor by animateColorAsState(
         targetValue = statusColor,
-        animationSpec = tween(500),
+        animationSpec = tween(300),
         label = "statusColor"
     )
 
+    // Pulsieren bei aktiver Beruhigung
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
     val alpha by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = if (shouldPulse) 0.6f else 1f,
+        targetValue = if (state == SoomiState.SOOTHING) 0.6f else 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(800),
             repeatMode = RepeatMode.Reverse
@@ -248,119 +369,45 @@ fun UnrestStatusDisplay(
         label = "pulseAlpha"
     )
 
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
+    Surface(
+        color = animatedColor.copy(alpha = 0.15f * alpha),
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier
     ) {
-        Surface(
-            color = animatedColor.copy(alpha = 0.15f * alpha),
-            shape = RoundedCornerShape(32.dp),
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(if (state == SoomiState.COOLDOWN) 120.dp else 100.dp)
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.headlineLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = animatedColor.copy(alpha = alpha)
+            when {
+                state == SoomiState.SOOTHING -> {
+                    Icon(
+                        imageVector = Icons.Default.Waves,
+                        contentDescription = null,
+                        tint = animatedColor.copy(alpha = alpha),
+                        modifier = Modifier.size(24.dp)
                     )
-                    
-                    if (isSessionActive && state != SoomiState.COOLDOWN) {
-                        val unrestDescription = "Unruhe-Wert ${score.value.toInt()}"
-                        Text(
-                            text = "Unruhe ${score.value.toInt()}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = animatedColor.copy(alpha = 0.7f),
-                            modifier = Modifier.semantics { 
-                                contentDescription = unrestDescription 
-                            }
-                        )
-                    }
-                    
-                    // Cooldown countdown
-                    if (state == SoomiState.COOLDOWN && cooldownRemaining > 0) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        val minutes = cooldownRemaining / 60
-                        val seconds = cooldownRemaining % 60
-                        Text(
-                            text = String.format("%02d:%02d", minutes, seconds),
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = animatedColor
-                        )
-                        Text(
-                            text = "Sound läuft weiter",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = animatedColor.copy(alpha = 0.6f)
-                        )
-                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                }
+                state == SoomiState.COOLDOWN && cooldownRemaining > 0 -> {
+                    Icon(
+                        imageVector = Icons.Default.HourglassEmpty,
+                        contentDescription = null,
+                        tint = animatedColor,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
                 }
             }
-        }
-    }
-}
-
-/**
- * Sound level barometer
- */
-@Composable
-fun SoundLevelBarometer(
-    level: Float,
-    modifier: Modifier = Modifier
-) {
-    val animatedLevel by animateFloatAsState(
-        targetValue = level,
-        animationSpec = tween(100),
-        label = "level"
-    )
-
-    val barColor = when {
-        level < 0.3f -> SoomiCalm
-        level < 0.6f -> SoomiRising
-        level < 0.8f -> SoomiCrisis.copy(alpha = 0.7f)
-        else -> SoomiCrisis
-    }
-
-    Column(
-        modifier = modifier,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "Geräuschpegel",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        
-        Spacer(modifier = Modifier.height(8.dp))
-        
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(32.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .fillMaxWidth(animatedLevel.coerceIn(0f, 1f))
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(barColor)
+            
+            Text(
+                text = statusText,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium,
+                color = animatedColor.copy(alpha = alpha)
             )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text("Leise", style = MaterialTheme.typography.bodySmall, color = SoomiCalm)
-            Text("Laut", style = MaterialTheme.typography.bodySmall, color = SoomiRising)
-            Text("Weinen", style = MaterialTheme.typography.bodySmall, color = SoomiCrisis)
         }
     }
 }
@@ -519,7 +566,7 @@ fun PrivacyNoticeWithVersion() {
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "soomi Baby v2.6",
+            text = "soomi Baby v2.7",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
         )
@@ -566,10 +613,12 @@ fun PermissionRequestCard(onRequestPermission: () -> Unit) {
     }
 }
 
+/**
+ * v2.7: Top Bar mit nur einem Icon (Library) statt zwei
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TonightTopBar(
-    onSoundTestClick: () -> Unit,
     onSoundLibraryClick: () -> Unit,
     onProgressClick: () -> Unit,
     onSettingsClick: () -> Unit
@@ -577,7 +626,6 @@ private fun TonightTopBar(
     TopAppBar(
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Moon icon
                 Icon(
                     imageVector = Icons.Default.NightsStay,
                     contentDescription = null,
@@ -593,14 +641,12 @@ private fun TonightTopBar(
             }
         },
         actions = {
+            // v2.7: Nur Library-Icon (erstes Musik-Icon), zweites entfernt
             IconButton(onClick = onSoundLibraryClick) {
                 Icon(Icons.Default.LibraryMusic, contentDescription = "Klangbibliothek")
             }
-            IconButton(onClick = onSoundTestClick) {
-                Icon(Icons.Default.MusicNote, contentDescription = "Klangtest")
-            }
             IconButton(onClick = onProgressClick) {
-                Icon(Icons.Default.CalendarMonth, contentDescription = "Fortschritt")
+                Icon(Icons.Default.CalendarMonth, contentDescription = "Unruhetagebuch")
             }
             IconButton(onClick = onSettingsClick) {
                 Icon(Icons.Default.Settings, contentDescription = "Einstellungen")
@@ -610,192 +656,6 @@ private fun TonightTopBar(
             containerColor = MaterialTheme.colorScheme.background
         )
     )
-}
-
-/**
- * Sound test dialog
- */
-@Composable
-fun SoundTestDialog(
-    onDismiss: () -> Unit,
-    onPlaySound: (SoundType, Float) -> Unit,
-    onStopSound: () -> Unit
-) {
-    var currentlyPlaying by remember { mutableStateOf<String?>(null) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.MusicNote,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(modifier = Modifier.width(12.dp))
-                Text("Klangtest")
-            }
-        },
-        text = {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Text(
-                    text = "Tippe zum Abspielen/Stoppen.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-
-                SoundTestItem(
-                    name = "Braunes Rauschen",
-                    description = "Tief, rumpelnd - am besten für Babys",
-                    isPlaying = currentlyPlaying == "brown",
-                    onClick = {
-                        if (currentlyPlaying == "brown") {
-                            onStopSound()
-                            currentlyPlaying = null
-                        } else {
-                            onPlaySound(SoundType.BROWN_NOISE, 0.5f)
-                            currentlyPlaying = "brown"
-                        }
-                    }
-                )
-
-                SoundTestItem(
-                    name = "Rosa Rauschen",
-                    description = "Ausgewogen, natürlich",
-                    isPlaying = currentlyPlaying == "pink",
-                    onClick = {
-                        if (currentlyPlaying == "pink") {
-                            onStopSound()
-                            currentlyPlaying = null
-                        } else {
-                            onPlaySound(SoundType.PINK_NOISE, 0.5f)
-                            currentlyPlaying = "pink"
-                        }
-                    }
-                )
-
-                SoundTestItem(
-                    name = "Shush-Puls",
-                    description = "Rhythmisches Shush-Muster",
-                    isPlaying = currentlyPlaying == "shush",
-                    onClick = {
-                        if (currentlyPlaying == "shush") {
-                            onStopSound()
-                            currentlyPlaying = null
-                        } else {
-                            onPlaySound(SoundType.SHUSH_PULSE, 0.5f)
-                            currentlyPlaying = "shush"
-                        }
-                    }
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Schließen")
-            }
-        }
-    )
-}
-
-@Composable
-fun SoundTestItem(
-    name: String,
-    description: String,
-    isPlaying: Boolean,
-    onClick: () -> Unit
-) {
-    val backgroundColor = if (isPlaying) {
-        MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-    } else {
-        MaterialTheme.colorScheme.surfaceVariant
-    }
-
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable { onClick() },
-        color = backgroundColor,
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Surface(
-                color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
-                shape = CircleShape,
-                modifier = Modifier.size(40.dp)
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        tint = if (isPlaying) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(16.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = if (isPlaying) FontWeight.Bold else FontWeight.Normal,
-                    color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            if (isPlaying) {
-                PlayingIndicator()
-            }
-        }
-    }
-}
-
-@Composable
-fun PlayingIndicator() {
-    val infiniteTransition = rememberInfiniteTransition(label = "playing")
-    
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        repeat(3) { index ->
-            val height by infiniteTransition.animateFloat(
-                initialValue = 8f,
-                targetValue = 20f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(300, delayMillis = index * 100),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "bar$index"
-            )
-            
-            Box(
-                modifier = Modifier
-                    .width(4.dp)
-                    .height(height.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(MaterialTheme.colorScheme.primary)
-            )
-        }
-    }
 }
 
 // ============================================================================
@@ -826,7 +686,6 @@ class TonightViewModel(
     private var baselineAudioOutput: AudioOutputEngine? = null
     private var audioRecord: AudioRecord? = null
     private var listeningJob: Job? = null
-    private var testAudioOutput: AudioOutputEngine? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -856,7 +715,6 @@ class TonightViewModel(
         }
 
         baselineAudioOutput = AudioOutputEngine()
-        testAudioOutput = AudioOutputEngine()
     }
 
     fun bindService(context: Context) {
@@ -969,26 +827,6 @@ class TonightViewModel(
         }
 
         service?.setBaselineMode(mode)
-    }
-
-    fun playTestSound(soundType: SoundType, volume: Float) {
-        try {
-            testAudioOutput?.apply {
-                stop()
-                start(soundType)
-                setVolume(volume)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    fun stopTestSound() {
-        try {
-            testAudioOutput?.stop()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
     }
 
     private fun observeService() {

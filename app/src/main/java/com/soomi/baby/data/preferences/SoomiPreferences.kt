@@ -17,7 +17,7 @@ import java.io.IOException
  * 
  * Stores user preferences that should persist across app restarts.
  * 
- * v2.6: Added SoundProfile persistence
+ * v2.7: Added cooldownSeconds for configurable cooldown duration
  */
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "soomi_settings")
@@ -40,6 +40,9 @@ class SoomiPreferences(private val context: Context) {
         
         // v2.6: Sound Profile
         val SOUND_PROFILE = stringPreferencesKey("sound_profile")
+        
+        // v2.7: Configurable Cooldown Duration
+        val COOLDOWN_SECONDS = intPreferencesKey("cooldown_seconds")
     }
     
     // --- Baseline Mode ---
@@ -135,6 +138,23 @@ class SoomiPreferences(private val context: Context) {
     suspend fun setVolumeCap(value: Float) {
         context.dataStore.edit { prefs ->
             prefs[Keys.VOLUME_CAP] = value.coerceIn(0.3f, 0.95f)
+        }
+    }
+    
+    // --- Cooldown Seconds (v2.7) ---
+    
+    val cooldownSeconds: Flow<Int> = context.dataStore.data
+        .catch { e ->
+            if (e is IOException) emit(emptyPreferences())
+            else throw e
+        }
+        .map { prefs ->
+            prefs[Keys.COOLDOWN_SECONDS] ?: 45  // Default 45 seconds
+        }
+    
+    suspend fun setCooldownSeconds(value: Int) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.COOLDOWN_SECONDS] = value.coerceIn(10, 120)
         }
     }
     
