@@ -99,12 +99,11 @@ fun StatusDisplay(
     modifier: Modifier = Modifier
 ) {
     val (label, color, icon, shouldPulse) = when (state) {
-        SoomiState.IDLE -> StatusInfo("Ready", SoomiOnBackgroundMuted, Icons.Default.Brightness3, false)
-        SoomiState.BASELINE -> StatusInfo("Monitoring", SoomiCalm, Icons.Default.Hearing, false)
-        SoomiState.EARLY_SMOOTH -> StatusInfo("Soothing", SoomiSoothing, Icons.Default.Waves, true)
-        SoomiState.CRISIS -> StatusInfo("Soothing (High)", SoomiCrisis, Icons.Default.Warning, true)
+        SoomiState.STOPPED -> StatusInfo("Stopped", SoomiOnBackgroundMuted, Icons.Default.Stop, false)
+        SoomiState.LISTENING -> StatusInfo("Listening", SoomiCalm, Icons.Default.Hearing, false)
+        SoomiState.SOOTHING -> StatusInfo("Soothing", SoomiSoothing, Icons.Default.Waves, true)
         SoomiState.COOLDOWN -> StatusInfo("Cooldown", SoomiRising, Icons.Default.HourglassEmpty, false)
-        SoomiState.PAUSED -> StatusInfo("Paused", SoomiOnBackgroundMuted, Icons.Default.Pause, false)
+        SoomiState.BASELINE -> StatusInfo("Baseline", SoomiCalm, Icons.Default.GraphicEq, false)
     }
     
     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
@@ -370,7 +369,7 @@ fun SettingsSlider(
             Text(
                 text = valueLabel,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         Slider(
@@ -378,41 +377,6 @@ fun SettingsSlider(
             onValueChange = onValueChange,
             valueRange = valueRange,
             modifier = Modifier.fillMaxWidth()
-        )
-    }
-}
-
-/**
- * Toggle setting with description
- */
-@Composable
-fun SettingsToggle(
-    title: String,
-    description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Spacer(modifier = Modifier.width(16.dp))
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange
         )
     }
 }
